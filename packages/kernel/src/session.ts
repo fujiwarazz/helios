@@ -37,8 +37,11 @@ interface TurnRecord {
   runIndex: number;
   turnIndex: number;
   checkpointRef: Ref;
-  /** turn 快照时刻的对话历史长度，回溯时据此截断内存历史 */
-  historyLenBefore: number;
+  /**
+   * turn 快照时刻的 HEAD 节点 id（回溯锚点，指向本 turn assistant 之前的节点）。
+   * 取代旧的 historyLenBefore：树化后按节点 id 定位比数组下标更稳。
+   */
+  anchorNodeId: string | null;
   messages: Message[];
 }
 
@@ -52,16 +55,35 @@ export interface SessionMeta {
   lastTurnIndex: number;
 }
 
+/** 分支信息：叶子节点 id + 从根到该叶子的深度。 */
+export interface BranchInfo {
+  leafId: string;
+  depth: number;
+}
+
 export class Session {
   readonly id: string;
-  private readonly history: Message[] = [];
+  /**
+   * 消息树：节点只增不删。`headId` 指向当前对话末端，LLM 只看 `pathToHead()`。
+   * 回溯/切分支只移动 HEAD，从不删节点 —— 旧分支永远可以切回去。
+   */
+  private readonly nodes = new Map<string, Message>();
+  private headId: string | null = null;
+  /**
+   * 压缩边界节点集合：pathToHead 走到带边界标记的 summary 节点即停止上溯，
+   * 从而把被压缩的旧节点排除出「发给 LLM 的路径」，但它们仍留在树里可回溯。
+   */
+  private readonly compactionBoundaries = new Set<string>();
   private runIndex = 0;
   private readonly listeners = new Set<AgentEventListener>();
   private readonly maxTurns: number;
   /** 已完成 turn 的持久化记录，供 rollback 定位快照与重写 turns.jsonl */
   private readonly turnLog: TurnRecord[] = [];
-  /** 历史压缩后累积的摘要文本，随后续每个 run 注入 system（与 memory 召回同路径） */
-  private compactedSummary = "";
+  /**
+   * 冻结的 system 前缀（base system + memory 召回），每会话只算一次。
+   * 缓存纪律一：不每 run recall，避免 system 前缀漂移导致 prompt cache 永不命中。
+   */
+  private systemPrefix: string | null = null;
   private createdAt = Date.now();
   private title = "";
 
@@ -79,34 +101,105 @@ export class Session {
     for (const l of this.listeners) l(event);
   }
 
-  getHistory(): Message[] {
-    return [...this.history];
+  // -------------------------------------------------------------------------
+  // 消息树核心
+  // -------------------------------------------------------------------------
+
+  /** 从 HEAD 沿 parentId 上溯到根（或压缩边界），反转为时间正序 —— LLM 只看这条。 */
+  private pathToHead(): Message[] {
+    const path: Message[] = [];
+    let cur = this.headId;
+    while (cur) {
+      const n = this.nodes.get(cur);
+      if (!n) break;
+      path.push(n);
+      if (this.compactionBoundaries.has(n.id)) break; // 到压缩边界即止，不再上溯被压缩节点
+      cur = n.parentId ?? null;
+    }
+    return path.reverse();
   }
+
+  /** 唯一顺序写入口：把 parentId 指向当前 HEAD，落库并前移 HEAD。 */
+  private appendNode(msg: Message): void {
+    msg.parentId = this.headId;
+    this.nodes.set(msg.id, msg);
+    this.headId = msg.id;
+  }
+
+  /** 移动 HEAD（回溯/切分支/压缩共用）。允许 null（回到空历史）。 */
+  private moveHead(nodeId: string | null): void {
+    if (nodeId !== null && !this.nodes.has(nodeId)) {
+      throw new Error(`node 不存在: ${nodeId}`);
+    }
+    this.headId = nodeId;
+    this.emit({ type: "head_changed", headId: nodeId });
+  }
+
+  getHistory(): Message[] {
+    return this.pathToHead();
+  }
+
+  /** 回到某个历史节点继续对话：只移 HEAD，不删任何节点（旧子树保留，随时可切回）。 */
+  fork(nodeId: string): void {
+    if (!this.nodes.has(nodeId)) throw new Error(`node 不存在: ${nodeId}`);
+    this.moveHead(nodeId);
+  }
+
+  /** 切换到某条分支的叶子（语义等同 fork 到该叶子）。 */
+  switchBranch(leafId: string): void {
+    this.fork(leafId);
+  }
+
+  /** 枚举所有分支叶子（无子节点的节点）及其深度，供分支切换 UI。 */
+  listBranches(): BranchInfo[] {
+    const hasChild = new Set<string>();
+    for (const n of this.nodes.values()) {
+      if (n.parentId) hasChild.add(n.parentId);
+    }
+    const branches: BranchInfo[] = [];
+    for (const n of this.nodes.values()) {
+      if (hasChild.has(n.id)) continue; // 非叶子跳过
+      let depth = 0;
+      let cur: string | null = n.id;
+      while (cur) {
+        depth++;
+        cur = this.nodes.get(cur)?.parentId ?? null;
+      }
+      branches.push({ leafId: n.id, depth });
+    }
+    return branches;
+  }
+
+  // -------------------------------------------------------------------------
+  // run 主循环
+  // -------------------------------------------------------------------------
 
   /** 发送一条用户消息，驱动一个完整 run（agent_start → 多 turn → agent_end）。 */
   async sendMessage(text: string): Promise<Message[]> {
     const { ports, hooks, logger } = this.opts;
     const runId = uid("run");
     const runIndex = this.runIndex++;
-    const before = this.history.length;
     if (!this.title) this.title = text.slice(0, 60);
 
     this.emit({ type: "agent_start", runId });
 
-    // run 开始前：对已闭合的历史按策略压缩（截断 + 摘要注入 system）
+    // run 开始前：对当前路径按策略压缩（生成 summary 节点、移 HEAD；旧节点保留为旧分支）
     await this.maybeCompact();
 
-    // 记忆召回 + 压缩摘要注入 system
-    const recalled = await ports.memory.recall(text);
-    const parts = [this.opts.system];
-    if (this.compactedSummary) {
-      parts.push(`<compacted_history>\n${this.compactedSummary}\n</compacted_history>`);
+    // 缓存纪律一：system 前缀（base + memory 召回）每会话只算一次并冻结，之后每 run 复用。
+    if (this.systemPrefix === null) {
+      const recalled = await ports.memory.recall(text);
+      const parts = [this.opts.system];
+      if (recalled) parts.push(`<memory>\n${recalled}\n</memory>`);
+      this.systemPrefix = parts.join("\n\n");
     }
-    if (recalled) parts.push(`<memory>\n${recalled}\n</memory>`);
-    const system = parts.join("\n\n");
+    const system = this.systemPrefix;
+
+    // run 起点 HEAD，用于收集本 run 新增的路径节点
+    const runStartHeadId = this.headId;
 
     const userMsg: Message = { id: uid("msg"), role: "user", content: text };
-    this.history.push(userMsg);
+    this.appendNode(userMsg);
 
     const turnIds: string[] = [];
     let turnIndex = 0;
@@ -116,8 +209,8 @@ export class Session {
     while (turnIndex < this.maxTurns) {
       const turnId = `${this.id}-${runIndex}-${turnIndex}`;
       turnIds.push(turnId);
-      // turn 前快照，供回溯。同时记录此刻历史长度，回溯时据此截断。
-      const historyLenBefore = this.history.length;
+      // turn 前锚点 = 此刻 HEAD（本 turn assistant 之前的节点），供回溯定位。
+      const anchorNodeId = this.headId;
       const checkpointRef = await ports.checkpoint.snapshot(turnId);
       this.emit({ type: "turn_start", turnId });
 
@@ -127,18 +220,18 @@ export class Session {
       );
       assistantMsg.turnId = turnId;
 
-      // Bug 7：只有非空 assistant 消息才入历史/持久化，避免 content:[] 触发下游 API 报错。
+      // Bug 7：只有非空 assistant 消息才入树/持久化，避免 content:[] 触发下游 API 报错。
       const turnMessages: Message[] = [...pendingTurnLeadMessages];
       pendingTurnLeadMessages = [];
       const assistantHasContent = Array.isArray(assistantMsg.content) && assistantMsg.content.length > 0;
       if (assistantHasContent) {
-        this.history.push(assistantMsg);
+        this.appendNode(assistantMsg);
         turnMessages.push(assistantMsg);
       }
 
-      // Bug 3：LLM 流中途报错 → 优雅结束本 run（保证 agent_end 一定 emit、历史一致），不 throw。
+      // Bug 3：LLM 流中途报错 → 优雅结束本 run（保证 agent_end 一定 emit、路径一致），不 throw。
       if (streamError) {
-        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
+        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
         this.emit({ type: "turn_end", turnId, toolResults: [] });
         runError = streamError;
         break;
@@ -146,9 +239,9 @@ export class Session {
 
       if (toolUseBlocks.length > 0) {
         const { toolResultMsg, records } = await this.executeTools(turnId, toolUseBlocks, parseErrorIds);
-        this.history.push(toolResultMsg);
+        this.appendNode(toolResultMsg);
         turnMessages.push(toolResultMsg);
-        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
+        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
         this.emit({ type: "turn_end", turnId, toolResults: records });
         turnIndex++;
         continue; // 下一个 turn，把工具结果喂回 LLM
@@ -158,16 +251,16 @@ export class Session {
       const stopDecision = await hooks.runStop({ turnCount: turnIndex + 1 });
       if (stopDecision.block && stopDecision.message) {
         const injected: Message = { id: uid("msg"), role: "user", content: stopDecision.message, turnId };
-        this.history.push(injected);
+        this.appendNode(injected);
         turnMessages.push(injected);
         pendingTurnLeadMessages = [injected];
-        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
+        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
         this.emit({ type: "turn_end", turnId, toolResults: [] });
         turnIndex++;
         continue;
       }
 
-      await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
+      await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
       this.emit({ type: "turn_end", turnId, toolResults: [] });
       break;
     }
@@ -178,7 +271,7 @@ export class Session {
       logger.warn(`run ${runId} 达到 turn 上限 ${this.maxTurns}，提前结束`);
     }
 
-    const newMessages = this.history.slice(before);
+    const newMessages = this.pathAfter(runStartHeadId);
     this.emit({
       type: "agent_end",
       runId,
@@ -189,6 +282,14 @@ export class Session {
     });
     logger.debug(`run ${runId} 完成，共 ${turnIds.length} 个 turn`);
     return newMessages;
+  }
+
+  /** 当前路径上、位于 anchorId 之后的节点（anchorId=null 表示整条路径）。 */
+  private pathAfter(anchorId: string | null): Message[] {
+    const full = this.pathToHead();
+    if (anchorId === null) return full;
+    const idx = full.findIndex((m) => m.id === anchorId);
+    return idx < 0 ? full : full.slice(idx + 1);
   }
 
   private async streamAssistant(
@@ -214,7 +315,8 @@ export class Session {
     let stopReason: StopReason = "end_turn";
     let streamError: string | undefined;
 
-    const gen = provider.streamMessage(this.history, this.opts.tools.list(), {
+    // 缓存前提：只发 pathToHead() 这条内容稳定、前缀不漂移的路径。
+    const gen = provider.streamMessage(this.pathToHead(), this.opts.tools.list(), {
       ...llmOptions,
       system,
     });
@@ -367,31 +469,46 @@ export class Session {
   }
 
   /**
-   * run 开始前的历史压缩：此刻历史全部 turn 已闭合（每个 tool_use 都有配对 tool_result），
-   * 故可安全按 coveredMessageIds 截断。摘要注入 system 而非塞回 history，
-   * 规避角色交替/首条必须 user 等约束。CompactStrategyPort 未加载时 shouldCompact 恒 false。
+   * run 开始前的历史压缩（树模型）：把被压缩区间浓缩为一个 summary 节点，
+   * 挂在被压缩区间「当前路径上最后一个被覆盖节点」之下（选法 A，保留血缘可回溯），
+   * 并标记为压缩边界 + 前移 HEAD。旧节点一个不删，作为「未压缩旧分支」随时可 switchBranch 回去。
+   * summary 节点只装摘要文本，不含 system/tools（那是独立稳定前缀，复制进节点会砸 cache 且 token 翻倍）。
+   * CompactStrategyPort 未加载时 shouldCompact 恒 false。
    */
   private async maybeCompact(): Promise<void> {
-    if (this.history.length === 0) return;
+    const path = this.pathToHead();
+    if (path.length === 0) return;
     const { ports } = this.opts;
     const state: ConversationState = {
-      messages: this.history,
-      approxTokens: approxTokens(this.history),
+      messages: path,
+      approxTokens: approxTokens(path),
     };
     if (!ports.compact.shouldCompact(state)) return;
 
-    this.emit({ type: "compact_start", messageCount: this.history.length });
-    const summary = await ports.compact.compact([...this.history]);
+    this.emit({ type: "compact_start", messageCount: path.length });
+    const summary = await ports.compact.compact([...path]);
     const covered = new Set(summary.coveredMessageIds);
-    const remaining = covered.size > 0 ? this.history.filter((m) => !covered.has(m.id)) : [];
-    this.history.length = 0;
-    this.history.push(...remaining);
-    // 累积摘要（多次压缩时后一次覆盖前一次，已覆盖内容包含在新摘要里）
-    this.compactedSummary = summary.text;
+
+    // 选法 A：summary.parentId 指向当前路径上最后一个被覆盖的节点（血缘相连，可上溯完整旧历史）。
+    let parentForSummary: string | null = this.headId;
+    for (const m of path) {
+      if (covered.has(m.id)) parentForSummary = m.id;
+    }
+
+    const summaryNode: Message = {
+      id: uid("msg"),
+      role: "user",
+      content: `<compacted_history>\n${summary.text}\n</compacted_history>`,
+      parentId: parentForSummary,
+    };
+    this.nodes.set(summaryNode.id, summaryNode);
+    this.compactionBoundaries.add(summaryNode.id); // pathToHead 到此即止，排除被压缩节点
+    this.moveHead(summaryNode.id);
+
     this.emit({
       type: "compact_end",
       summaryLength: summary.text.length,
-      remaining: remaining.length,
+      remaining: this.pathToHead().length,
     });
   }
 
@@ -432,10 +549,11 @@ export class Session {
   }
 
   /**
-   * 从磁盘 resume：读回 turns.jsonl 全量回放重建 history + turnLog，读 meta.json 恢复
+   * 从磁盘 resume：读回 turns.jsonl 全量回放重建消息树 + turnLog，读 meta.json 恢复
    * title/createdAt，并把 runIndex 续到最大已用 run 之后（新 run index 自然递增不冲突）。
-   * 关键：historyLenBefore 按回放时的累计长度**重算**（而非信任落盘值），
-   * 使 resume 后的 rollback 索引与重建后的 history 严格一致（规避历史压缩造成的偏移）。
+   * 关键：anchorNodeId 按回放时的 HEAD **重算**（指向该 turn 全部消息之前的节点），
+   * 使 resume 后的 rollback 锚点与重建后的树严格一致。
+   * 注：分支/压缩边界为内存态，当前不持久化（旧分支跨 resume 不保留，与旧实现行为一致）。
    * 返回是否加载到任何 turn。
    */
   async restore(): Promise<boolean> {
@@ -458,7 +576,9 @@ export class Session {
     const lines = raw.split("\n").filter((l) => l.trim());
     if (lines.length === 0) return false;
 
-    this.history.length = 0;
+    this.nodes.clear();
+    this.headId = null;
+    this.compactionBoundaries.clear();
     this.turnLog.length = 0;
     let maxRunIndex = -1;
     for (const line of lines) {
@@ -469,23 +589,25 @@ export class Session {
         this.opts.logger.warn(`跳过损坏的 turn 记录：${line.slice(0, 80)}`);
         continue;
       }
-      // 按当前回放进度重算 historyLenBefore
-      rec.historyLenBefore = this.history.length;
-      this.history.push(...(rec.messages ?? []));
+      // 锚点 = 追加本 turn 消息之前的 HEAD（按回放进度重算）。
+      rec.anchorNodeId = this.headId;
+      for (const m of rec.messages ?? []) {
+        this.appendNode(m); // 线性重建：parentId 按回放顺序重写
+      }
       this.turnLog.push(rec);
       if (rec.runIndex > maxRunIndex) maxRunIndex = rec.runIndex;
     }
     this.runIndex = maxRunIndex + 1;
     this.opts.logger.info(
-      `会话 ${this.id} 已 resume：turns=${this.turnLog.length} 历史消息=${this.history.length} 下一 run=${this.runIndex}`,
+      `会话 ${this.id} 已 resume：turns=${this.turnLog.length} 历史消息=${this.nodes.size} 下一 run=${this.runIndex}`,
     );
     return this.turnLog.length > 0;
   }
 
   /**
-   * 回溯到指定 turn 之前的状态：还原文件快照 + 截断对话历史 + 截断 turns 日志。
-   * 语义与 CheckpointPort 快照时点对齐（turn 开始、assistant 响应之前）。
-   * 无 CheckpointPort（noop）时文件不还原，仅截断历史——与降级约定一致。
+   * 回溯到指定 turn 之前的状态：还原文件快照 + 把 HEAD 移到该 turn 的锚点节点（减法，不删任何节点）。
+   * 语义与 CheckpointPort 快照时点对齐（turn 开始、assistant 响应之前）。旧分支全部保留可回切。
+   * 无 CheckpointPort（noop）时文件不还原，仅移 HEAD——与降级约定一致。
    */
   async rollback(turnId: string): Promise<void> {
     const idx = this.turnLog.findIndex((r) => r.turnId === turnId);
@@ -494,9 +616,9 @@ export class Session {
 
     await this.opts.ports.checkpoint.restore(target.checkpointRef);
 
-    // 截断内存历史到该 turn 快照时刻
-    this.history.length = target.historyLenBefore;
-    // 丢弃该 turn 及其后的所有 turn 记录，并重写日志
+    // 把 HEAD 移到锚点（该 turn assistant 之前的节点）；不删节点、不删 turnLog 后续记录之外的树。
+    this.moveHead(target.anchorNodeId);
+    // 丢弃该 turn 及其后的所有 turn 记录，并重写日志（新对话将从锚点长出新分支）。
     this.turnLog.length = idx;
     try {
       await this.writeTurnLog();
@@ -504,8 +626,9 @@ export class Session {
     } catch (err) {
       this.opts.logger.warn(`turns 日志重写失败：${err instanceof Error ? err.message : String(err)}`);
     }
-    this.emit({ type: "rollback", turnId, historyLength: this.history.length });
-    this.opts.logger.debug(`已回溯到 turn ${turnId} 之前，历史长度 ${this.history.length}`);
+    const historyLength = this.pathToHead().length;
+    this.emit({ type: "rollback", turnId, historyLength });
+    this.opts.logger.debug(`已回溯到 turn ${turnId} 之前，历史长度 ${historyLength}`);
   }
 }
 

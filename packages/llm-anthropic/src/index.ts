@@ -12,6 +12,8 @@ import {
   toAnthropicMessages,
   toAnthropicTools,
   mapStopReason,
+  cachedSystem,
+  applyCacheBreakpoints,
 } from "./convert";
 
 const DEFAULT_MODEL = "claude-3-5-sonnet-latest";
@@ -45,12 +47,15 @@ class AnthropicProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
+    const anthropicMessages = toAnthropicMessages(messages);
+    applyCacheBreakpoints(anthropicMessages); // 缓存纪律二：历史前缀静态断点
     const stream = await this.client.messages.create({
       model: opts.model ?? this.defaultModel,
       max_tokens: opts.maxTokens ?? 4096,
       temperature: opts.temperature,
-      system: opts.system,
-      messages: toAnthropicMessages(messages),
+      // system 前缀打 cache 断点（最稳定的缓存块）；无 system 时省略。
+      system: opts.system ? cachedSystem(opts.system) : undefined,
+      messages: anthropicMessages,
       tools: tools.length ? toAnthropicTools(tools) : undefined,
       stream: true,
     });

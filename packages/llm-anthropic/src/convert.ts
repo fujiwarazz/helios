@@ -75,6 +75,41 @@ function stringifyOutput(output: unknown): string {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Prompt cache 断点（缓存纪律二）
+// Anthropic 手动 cache_control：从头逐 token 比对，遇第一个不同 token 之前全部命中。
+// kernel 已保证 pathToHead() 内容稳定、system 前缀冻结（公共前提），provider 侧只负责
+// 在稳定前缀上打静态断点。切分支/回溯回旧节点再往下时，共享祖先前缀天然复用缓存。
+// ---------------------------------------------------------------------------
+
+type EphemeralCacheControl = { type: "ephemeral" };
+
+/** system 前缀转带 cache_control 的 text block（最靠前、最稳定、跨所有分支共享的缓存块）。 */
+export function cachedSystem(
+  system: string,
+): { type: "text"; text: string; cache_control: EphemeralCacheControl }[] {
+  return [{ type: "text", text: system, cache_control: { type: "ephemeral" } }];
+}
+
+/**
+ * 在 messages 上打一个静态 cache 断点：取倒数第二个 message（只有一条时退化为最后一条）
+ * 的最后一个内容块加 cache_control，命中「历史前缀」缓存。就地修改传入数组。
+ */
+export function applyCacheBreakpoints(messages: AnthropicMessageParam[]): void {
+  if (messages.length === 0) return;
+  const idx = messages.length >= 2 ? messages.length - 2 : messages.length - 1;
+  const msg = messages[idx];
+  const content = msg.content;
+  if (typeof content === "string") {
+    msg.content = [
+      { type: "text", text: content, cache_control: { type: "ephemeral" } } as BlockParam,
+    ];
+  } else if (content.length > 0) {
+    const last = content[content.length - 1] as BlockParam & { cache_control?: EphemeralCacheControl };
+    last.cache_control = { type: "ephemeral" };
+  }
+}
+
 export function toAnthropicTools(tools: Tool[]): AnthropicToolParam[] {
   return tools.map((t) => ({
     name: t.name,

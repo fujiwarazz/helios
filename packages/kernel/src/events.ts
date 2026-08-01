@@ -13,6 +13,7 @@ export type AgentEvent =
   | { type: "compact_start"; messageCount: number }
   | { type: "compact_end"; summaryLength: number; remaining: number }
   | { type: "rollback"; turnId: string; historyLength: number }
+  | { type: "head_changed"; headId: string | null }
   | {
       type: "agent_end";
       runId: string;
