@@ -6,8 +6,8 @@
 
 import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
-import { RpcClient } from "@helios/protocol";
-import type { ConnectionState } from "@helios/protocol";
+import { RpcClient } from "@helios/protocol/browser";
+import type { ConnectionState } from "@helios/protocol/browser";
 import type { IChatClient } from "./types";
 
 export class RpcChatClient implements IChatClient {

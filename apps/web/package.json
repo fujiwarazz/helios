@@ -1,0 +1,37 @@
+{
+  "name": "@helios/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n host,web -c blue,green \"tsx server/host.ts\" \"vite\"",
+    "dev:web": "vite",
+    "dev:host": "tsx server/host.ts",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit"
+  },
+  "dependencies": {
+    "@helios/ui-chat": "workspace:*",
+    "@helios/protocol": "workspace:*",
+    "@helios/host": "workspace:*",
+    "@helios/kernel": "workspace:*",
+    "@helios/fs-node": "workspace:*",
+    "@helios/llm-anthropic": "workspace:*",
+    "@helios/memory-fs": "workspace:*",
+    "@helios/checkpoint-fs": "workspace:*",
+    "@helios/compact-default": "workspace:*",
+    "@helios/teams-mailbox": "workspace:*",
+    "@helios/capability-fs": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "concurrently": "^9.1.0",
+    "@testing-library/react": "^16.0.1",
+    "jsdom": "^25.0.1"
+  }
+}

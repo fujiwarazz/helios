@@ -33,7 +33,9 @@
       "@helios/cap-mcp": ["./packages/cap-mcp/src/index.ts"],
       "@helios/cap-lsp": ["./packages/cap-lsp/src/index.ts"],
       "@helios/protocol": ["./packages/protocol/src/index.ts"],
-      "@helios/ui-chat": ["./packages/ui-chat/src/index.ts"]
+      "@helios/protocol/browser": ["./packages/protocol/src/browser.ts"],
+      "@helios/ui-chat": ["./packages/ui-chat/src/index.ts"],
+      "@helios/host": ["./packages/host/src/index.ts"]
     },
     "baseUrl": "."
   }
