@@ -6,20 +6,42 @@ type AnthropicToolParam = Anthropic.Tool;
 // 0.32 未直接导出 ContentBlockParam，从 MessageParam 的 content 数组元素推导。
 type BlockParam = Exclude<AnthropicMessageParam["content"], string>[number];
 
-/** helios Message[] → Anthropic messages（system 单独经 opts 传，不进 messages）。 */
+/**
+ * helios Message[] → Anthropic messages（system 单独经 opts 传，不进 messages）。
+ * Anthropic Messages API 要求角色严格交替，连续同角色会 400；而树模型下会出现连续
+ * user（如压缩 summary 节点[user] 紧跟本 run 的 userMsg[user]，或多条 toolResult），
+ * 故在适配层合并连续同角色消息为一条（内容块拼接）—— 隔离在 provider 边界，不外溢 kernel。
+ */
 export function toAnthropicMessages(messages: Message[]): AnthropicMessageParam[] {
   const out: AnthropicMessageParam[] = [];
   for (const m of messages) {
     if (m.role === "system") continue;
+    let param: AnthropicMessageParam;
     if (m.role === "user") {
-      out.push({ role: "user", content: textOf(m.content) });
+      param = { role: "user", content: textOf(m.content) };
     } else if (m.role === "assistant") {
-      out.push({ role: "assistant", content: toAnthropicBlocks(m.content) });
+      param = { role: "assistant", content: toAnthropicBlocks(m.content) };
     } else if (m.role === "toolResult") {
-      out.push({ role: "user", content: toToolResultBlocks(m.content) });
+      param = { role: "user", content: toToolResultBlocks(m.content) };
+    } else {
+      continue;
+    }
+    const prev = out[out.length - 1];
+    if (prev && prev.role === param.role) {
+      prev.content = [...toBlockArray(prev.content), ...toBlockArray(param.content)];
+    } else {
+      out.push(param);
     }
   }
   return out;
+}
+
+/** 归一化消息内容为内容块数组（合并连续同角色消息时用）。 */
+function toBlockArray(content: AnthropicMessageParam["content"]): BlockParam[] {
+  if (typeof content === "string") {
+    return content ? [{ type: "text", text: content } as BlockParam] : [];
+  }
+  return [...content];
 }
 
 function textOf(content: string | ContentBlock[]): string {

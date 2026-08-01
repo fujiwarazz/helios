@@ -489,21 +489,34 @@ export class Session {
     const summary = await ports.compact.compact([...path]);
     const covered = new Set(summary.coveredMessageIds);
 
-    // 选法 A：summary.parentId 指向当前路径上最后一个被覆盖的节点（血缘相连，可上溯完整旧历史）。
-    let parentForSummary: string | null = this.headId;
-    for (const m of path) {
-      if (covered.has(m.id)) parentForSummary = m.id;
+    // 当前路径上最后一个被覆盖节点的下标（选法 A：summary 挂其下，血缘相连可上溯完整旧历史）。
+    let lastCoveredIdx = -1;
+    for (let i = 0; i < path.length; i++) {
+      if (covered.has(path[i].id)) lastCoveredIdx = i;
+    }
+    if (lastCoveredIdx < 0) {
+      // 未覆盖任何节点：无可压缩，balance 事件后返回（正常不会走到，shouldCompact 命中才进来）。
+      this.emit({ type: "compact_end", summaryLength: summary.text.length, remaining: path.length });
+      return;
     }
 
     const summaryNode: Message = {
       id: uid("msg"),
       role: "user",
       content: `<compacted_history>\n${summary.text}\n</compacted_history>`,
-      parentId: parentForSummary,
+      parentId: path[lastCoveredIdx].id,
     };
     this.nodes.set(summaryNode.id, summaryNode);
     this.compactionBoundaries.add(summaryNode.id); // pathToHead 到此即止，排除被压缩节点
-    this.moveHead(summaryNode.id);
+
+    // 部分覆盖时把「未被覆盖的近端节点」接到 summary 之后，避免这段近期上下文被静默丢弃。
+    const tail = path.slice(lastCoveredIdx + 1);
+    if (tail.length > 0) {
+      tail[0].parentId = summaryNode.id; // 重接：summary → 近端 tail → ... → 原 HEAD
+      this.moveHead(this.headId); // HEAD 不变但路径已重排，广播一次让订阅方刷新
+    } else {
+      this.moveHead(summaryNode.id); // 全覆盖：HEAD 移到 summary
+    }
 
     this.emit({
       type: "compact_end",

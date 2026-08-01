@@ -95,3 +95,38 @@ describe("消息树 —— fork/switchBranch 不删旧分支", () => {
     expect(() => session.fork("nope")).toThrow(/node 不存在/);
   });
 });
+
+describe("compact-on-tree —— 部分覆盖不丢近端上下文", () => {
+  it("summary 只覆盖前缀时，未覆盖的近端节点 re-parent 到 summary 之后仍在路径上", async () => {
+    const kernel = new Kernel({
+      workDir,
+      manifest: {
+        plugins: [
+          { port: "FileSystemPort", package: "@helios/fs-node" },
+          { port: "CompactStrategyPort", package: fixture("mockCompactPartial.ts") },
+          { port: "LLMProvider", package: fixture("mockLlmCounter.ts") },
+        ],
+      },
+      logger: silent,
+    });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    await session.sendMessage("ALPHA_FIRST_USER");
+    const afterRun1 = session.getHistory();
+    const run1AssistantText = textOf(afterRun1.find((m) => m.role === "assistant")!);
+
+    // run2 开头触发部分覆盖压缩：覆盖 {u1}，保留 a1（近端 tail）
+    await session.sendMessage("BETA_SECOND_USER");
+    const history = session.getHistory();
+
+    // 被覆盖的 run1 user 移出路径
+    expect(history.some((m) => textOf(m).includes("ALPHA_FIRST_USER"))).toBe(false);
+    // summary 进入路径
+    expect(history.some((m) => textOf(m).includes("COMPACTED_PARTIAL"))).toBe(true);
+    // 未被覆盖的近端 tail（run1 assistant）仍在路径上，未被静默丢弃
+    expect(history.some((m) => textOf(m).includes(run1AssistantText))).toBe(true);
+    // run2 的内容也在
+    expect(history.some((m) => textOf(m).includes("BETA_SECOND_USER"))).toBe(true);
+  });
+});
