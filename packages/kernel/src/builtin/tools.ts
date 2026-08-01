@@ -1,4 +1,5 @@
 import { execa } from "execa";
+import { isIP } from "node:net";
 import { convert as htmlToText } from "html-to-text";
 import type { Tool, ToolContext } from "@helios/ports";
 
@@ -21,23 +22,42 @@ export function assertFetchUrlAllowed(raw: string): void {
   if (u.protocol !== "http:" && u.protocol !== "https:") {
     throw new Error(`仅允许 http/https：${u.protocol}`);
   }
-  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (
-    host === "localhost" ||
-    host === "0.0.0.0" ||
-    host === "::1" ||
-    host === "169.254.169.254" || // 云元数据
-    host.startsWith("127.") ||
-    host.startsWith("169.254.") || // link-local
-    host.startsWith("10.") ||
-    host.startsWith("192.168.") ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(host) || // 172.16.0.0/12
-    host.startsWith("fc") || // IPv6 唯一本地地址 fc00::/7
-    host.startsWith("fd") ||
-    host.startsWith("fe80") // IPv6 link-local
-  ) {
+  // 去方括号（IPv6）、去尾点（FQDN 规范化，如 "localhost."）。
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost") {
+    throw new Error(`拒绝访问本机地址（SSRF 防护）：${host}`);
+  }
+  // 仅当 host 确为字面 IP 时才做私网/本机段判断，避免 "fd.example.com"、
+  // "10.foo.com"、"fc-cdn.net" 等合法域名被前缀误伤。
+  const kind = isIP(host); // 0=非IP，4=IPv4，6=IPv6
+  if (kind === 4 && isPrivateIPv4(host)) {
     throw new Error(`拒绝访问本机/内网地址（SSRF 防护）：${host}`);
   }
+  if (kind === 6 && isLocalIPv6(host)) {
+    throw new Error(`拒绝访问本机/内网地址（SSRF 防护）：${host}`);
+  }
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  return (
+    ip === "0.0.0.0" ||
+    ip === "169.254.169.254" || // 云元数据
+    ip.startsWith("127.") || // 回环
+    ip.startsWith("169.254.") || // link-local
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip) // 172.16.0.0/12
+  );
+}
+
+function isLocalIPv6(ip: string): boolean {
+  return (
+    ip === "::1" || // 回环
+    ip === "::" ||
+    ip.startsWith("fc") || // 唯一本地地址 fc00::/7
+    ip.startsWith("fd") ||
+    ip.startsWith("fe80") // link-local
+  );
 }
 
 /** 边读边累加、达到上限即中止，避免大响应打满内存。 */
@@ -74,7 +94,9 @@ const bashTool: Tool = {
   },
   async execute(input, ctx: ToolContext) {
     const { command, timeout } = input as { command: string; timeout?: number };
-    const cappedTimeout = Math.min(timeout ?? BASH_TIMEOUT_DEFAULT, BASH_TIMEOUT_MAX);
+    // timeout 缺省或 <=0（含 0 会被 execa 解读为"永不超时"）时回落默认值，再夹到硬上限。
+    const wanted = typeof timeout === "number" && timeout > 0 ? timeout : BASH_TIMEOUT_DEFAULT;
+    const cappedTimeout = Math.min(wanted, BASH_TIMEOUT_MAX);
     try {
       const res = await execa(command, {
         shell: true,

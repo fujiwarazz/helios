@@ -20,27 +20,36 @@ class NodeFileSystem implements FileSystemPort {
   /**
    * 归一化路径并做越界隔离：
    * ① isAbsolute?resolve → 折叠 `..`；② 纯路径 guard 校验；
-   * ③ realpath 解析符号链接后再校验（防 workDir 内软链指向外部绕过）。
-   * write 时目标文件可能尚不存在，故对**父目录**做 realpath 校验。
+   * ③ 解析「最深已存在祖先」的 realpath 后再校验，把尚不存在的层级原样拼回。
+   * 这样无论叶子本身是软链（写入已存在的软链文件）、还是中间祖先是软链，
+   * 都会被折叠成真实路径后校验，杜绝 workDir 内软链指向外部的绕过。
    */
   private async resolveWithin(path: string, op: "read" | "write"): Promise<string> {
     const full = isAbsolute(path) ? path : resolve(this.workDir, path);
     this.guard.assertAllowed(full, op); // 纯路径校验（先于符号链接解析）
+    const real = await this.realpathExistingPrefix(full);
+    this.guard.assertAllowed(real, op); // 折叠软链后再校验真实落点
+    return real;
+  }
 
-    try {
-      let real: string;
-      if (op === "read") {
-        real = await realpath(full);
-      } else {
-        // 文件可能不存在：解析父目录真实路径 + 拼回文件名。
-        real = join(await realpath(dirname(full)), basename(full));
+  /**
+   * 从 full 向上寻找最深的已存在祖先并 realpath（折叠所有软链），
+   * 再把剩余尚不存在的层级原样拼回。既解析叶子软链，也解析中间祖先软链。
+   */
+  private async realpathExistingPrefix(full: string): Promise<string> {
+    const missing: string[] = [];
+    let cur = full;
+    for (;;) {
+      try {
+        const real = await realpath(cur);
+        return missing.length ? join(real, ...missing.reverse()) : real;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+        const parent = dirname(cur);
+        if (parent === cur) return full; // 抵达根仍不存在：极端情况，返回原值
+        missing.push(basename(cur));
+        cur = parent;
       }
-      this.guard.assertAllowed(real, op);
-      return real;
-    } catch (err) {
-      // 目标/父目录尚不存在（如首次写入的新目录）：纯路径校验已通过，放行。
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return full;
-      throw err;
     }
   }
 

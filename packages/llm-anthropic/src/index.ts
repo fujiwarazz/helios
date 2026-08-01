@@ -45,15 +45,18 @@ class AnthropicProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
-    const stream = await this.client.messages.create({
-      model: opts.model ?? this.defaultModel,
-      max_tokens: opts.maxTokens ?? 4096,
-      temperature: opts.temperature,
-      system: opts.system,
-      messages: toAnthropicMessages(messages),
-      tools: tools.length ? toAnthropicTools(tools) : undefined,
-      stream: true,
-    });
+    const stream = await this.client.messages.create(
+      {
+        model: opts.model ?? this.defaultModel,
+        max_tokens: opts.maxTokens ?? 4096,
+        temperature: opts.temperature,
+        system: opts.system,
+        messages: toAnthropicMessages(messages),
+        tools: tools.length ? toAnthropicTools(tools) : undefined,
+        stream: true,
+      },
+      { signal: opts.signal },
+    );
 
     // index → tool_use 的 block id，用于把 input_json_delta 归到正确的工具调用
     const indexToToolId = new Map<number, string>();

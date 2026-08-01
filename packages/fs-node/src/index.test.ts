@@ -67,4 +67,17 @@ describe("fs-node 默认 WorkDirGuard 越界隔离", () => {
     // 路径字面在 workDir 内，但 realpath 解析后落在 outsideDir → 拒绝
     await expect(fs().readFile("d/link/secret.txt")).rejects.toThrow(/越界/);
   });
+
+  it("写入指向外部的既有叶子软链 → 折叠后落点越界被拒", async () => {
+    // 叶子本身是软链，父目录在 workDir 内：旧实现只 realpath 父目录会漏判。
+    await fsWrite(join(outsideDir, "target.txt"), "orig");
+    await symlink(join(outsideDir, "target.txt"), join(workDir, "leaklink"), "file");
+    await expect(fs().writeFile("leaklink", "HACKED")).rejects.toThrow(/越界/);
+  });
+
+  it("ENOENT 祖先中含指向外部的软链 → 折叠后越界被拒", async () => {
+    // workDir/esc -> outsideDir（目录软链），写 esc/new/x.txt 时 new/ 尚不存在。
+    await symlink(outsideDir, join(workDir, "esc"), "dir");
+    await expect(fs().writeFile("esc/new/x.txt", "y")).rejects.toThrow(/越界/);
+  });
 });

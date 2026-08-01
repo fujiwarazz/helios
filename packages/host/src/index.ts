@@ -22,6 +22,7 @@ export function bindSession(
     history: () => session.getHistory(),
     sendMessage: (p) => session.sendMessage((p as { text: string }).text),
     rollback: (p) => session.rollback((p as { turnId: string }).turnId),
+    cancel: () => session.cancel(), // 让外部（UI/Stop 按钮）可真正触发中断
   });
   const unbindEvents = session.on((e: AgentEvent) =>
     server.broadcast(`session:${session.id}`, e, session.id),

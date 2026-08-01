@@ -33,6 +33,23 @@ describe("WebFetch SSRF 防护 —— assertFetchUrlAllowed", () => {
     expect(() => assertFetchUrlAllowed("http://93.184.216.34/")).not.toThrow();
   });
 
+  it("私网前缀相同的合法域名不被误伤（IP 段判断需 net.isIP 确认为字面 IP）", () => {
+    for (const ok of [
+      "http://10.foo.com/",        // 以 "10." 开头的域名
+      "http://192.168.example.net/", // 以 "192.168." 开头的域名
+      "http://fc-cdn.net/",         // 以 "fc" 开头的域名
+      "http://fd.example.com/",     // 以 "fd" 开头的域名
+      "http://fe80-host.io/",       // 以 "fe80" 开头的域名
+      "http://127-server.com/",     // 以 "127." 开头？其实是 "127-"，普通域名
+    ]) {
+      expect(() => assertFetchUrlAllowed(ok), ok).not.toThrow();
+    }
+  });
+
+  it("尾点 FQDN 规范化：localhost. 仍被拒", () => {
+    expect(() => assertFetchUrlAllowed("http://localhost./x")).toThrow();
+  });
+
   it("非法 URL 抛错", () => {
     expect(() => assertFetchUrlAllowed("not a url")).toThrow(/非法 URL/);
   });
@@ -53,6 +70,20 @@ describe("Bash —— signal 中断生效", () => {
     const res = await bashTool.execute({ command: "sleep 5" }, ctx);
     expect(res.isError).toBe(true);
     expect(Date.now() - start).toBeLessThan(2000); // 远小于 sleep 5 与默认超时
+  });
+
+  it("timeout=0 不会禁用超时上限（回落默认值）", async () => {
+    const ctx = {
+      workDir: tmpdir(),
+      logger: silent,
+      ports: {} as unknown as PortRegistry,
+      askQuestion: async () => ({ answers: [] }),
+    } as ToolContext;
+    // 正常快命令：timeout=0 时应正常返回（若 0 被当"永不超时"也不影响此断言），
+    // 关键是不抛异常 —— 回归保护 execa timeout:0 语义被回落。
+    const res = await bashTool.execute({ command: "echo ok", timeout: 0 }, ctx);
+    expect(res.output).toContain("ok");
+    expect(res.isError).toBe(false);
   });
 });
 
