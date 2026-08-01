@@ -1,0 +1,24 @@
+{
+  "name": "@helios/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "helios": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@helios/kernel": "workspace:*",
+    "@helios/ports": "workspace:*",
+    "@helios/fs-node": "workspace:*",
+    "@helios/llm-anthropic": "workspace:*",
+    "@helios/memory-fs": "workspace:*",
+    "@helios/checkpoint-fs": "workspace:*",
+    "@helios/compact-default": "workspace:*",
+    "@helios/teams-mailbox": "workspace:*",
+    "@helios/capability-fs": "workspace:*"
+  }
+}

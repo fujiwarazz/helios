@@ -1,0 +1,16 @@
+{
+  "name": "@helios/llm-anthropic",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@helios/ports": "workspace:*",
+    "@anthropic-ai/sdk": "^0.32.1"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "types": ["node"],
+    "paths": {
+      "@helios/ports": ["./packages/ports/src/index.ts"],
+      "@helios/kernel": ["./packages/kernel/src/index.ts"],
+      "@helios/fs-node": ["./packages/fs-node/src/index.ts"],
+      "@helios/llm-anthropic": ["./packages/llm-anthropic/src/index.ts"],
+      "@helios/memory-fs": ["./packages/memory-fs/src/index.ts"],
+      "@helios/checkpoint-fs": ["./packages/checkpoint-fs/src/index.ts"],
+      "@helios/compact-default": ["./packages/compact-default/src/index.ts"],
+      "@helios/teams-mailbox": ["./packages/teams-mailbox/src/index.ts"],
+      "@helios/capability-fs": ["./packages/capability-fs/src/index.ts"],
+      "@helios/llm-openai": ["./packages/llm-openai/src/index.ts"],
+      "@helios/checkpoint-git": ["./packages/checkpoint-git/src/index.ts"],
+      "@helios/cap-cron": ["./packages/cap-cron/src/index.ts"],
+      "@helios/cap-mcp": ["./packages/cap-mcp/src/index.ts"],
+      "@helios/cap-lsp": ["./packages/cap-lsp/src/index.ts"],
+      "@helios/protocol": ["./packages/protocol/src/index.ts"],
+      "@helios/ui-chat": ["./packages/ui-chat/src/index.ts"]
+    },
+    "baseUrl": "."
+  }
+}

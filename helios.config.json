@@ -1,0 +1,20 @@
+{
+  "//": "manifest 声明顺序即加载顺序（串行）。被依赖的基础 Port（FileSystemPort）必须写在前面。",
+  "plugins": [
+    { "port": "FileSystemPort", "package": "@helios/fs-node" },
+    { "port": "MemoryPort", "package": "@helios/memory-fs" },
+    { "port": "CheckpointPort", "package": "@helios/checkpoint-fs" },
+    { "port": "CompactStrategyPort", "package": "@helios/compact-default" },
+    { "port": "MultiAgentPort", "package": "@helios/teams-mailbox" },
+    { "port": "CapabilityProvider", "package": "@helios/capability-fs" },
+    {
+      "port": "LLMProvider",
+      "package": "@helios/llm-anthropic",
+      "options": {
+        "baseURL": "http://127.0.0.1:8788",
+        "apiKey": "local",
+        "model": "Claude-4.8-opus"
+      }
+    }
+  ]
+}
