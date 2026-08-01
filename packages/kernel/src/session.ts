@@ -62,6 +62,8 @@ export class Session {
   private readonly turnLog: TurnRecord[] = [];
   /** 历史压缩后累积的摘要文本，随后续每个 run 注入 system（与 memory 召回同路径） */
   private compactedSummary = "";
+  /** 当前 run 的中断控制器，其 signal 贯通到工具（Bash/WebFetch），支持 cancel。 */
+  private currentAbort: AbortController | null = null;
   private createdAt = Date.now();
   private title = "";
 
@@ -79,6 +81,11 @@ export class Session {
     for (const l of this.listeners) l(event);
   }
 
+  /** 中断当前 run：触发 signal，让正在执行的工具（Bash/WebFetch）尽快停止。 */
+  cancel(): void {
+    this.currentAbort?.abort();
+  }
+
   getHistory(): Message[] {
     return [...this.history];
   }
@@ -90,6 +97,9 @@ export class Session {
     const runIndex = this.runIndex++;
     const before = this.history.length;
     if (!this.title) this.title = text.slice(0, 60);
+
+    const abort = new AbortController();
+    this.currentAbort = abort;
 
     this.emit({ type: "agent_start", runId });
 
@@ -179,6 +189,7 @@ export class Session {
     }
 
     const newMessages = this.history.slice(before);
+    if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",
       runId,
@@ -286,6 +297,7 @@ export class Session {
       workDir,
       logger,
       ports,
+      signal: this.currentAbort?.signal,
       askQuestion: this.opts.askQuestion,
     };
     const resultBlocks: ContentBlock[] = [];
