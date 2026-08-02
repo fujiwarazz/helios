@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
-    "cli": "pnpm --filter @helios/cli start"
+    "cli": "pnpm --filter @helios/cli start",
+    "web": "pnpm --filter @helios/web dev"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

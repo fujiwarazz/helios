@@ -36,8 +36,13 @@ export default defineConfig({
       "@helios/cap-cron": resolve(__dirname, "packages/cap-cron/src/index.ts"),
       "@helios/cap-mcp": resolve(__dirname, "packages/cap-mcp/src/index.ts"),
       "@helios/cap-lsp": resolve(__dirname, "packages/cap-lsp/src/index.ts"),
+      "@helios/protocol/browser": resolve(
+        __dirname,
+        "packages/protocol/src/browser.ts",
+      ),
       "@helios/protocol": resolve(__dirname, "packages/protocol/src/index.ts"),
       "@helios/ui-chat": resolve(__dirname, "packages/ui-chat/src/index.ts"),
+      "@helios/host": resolve(__dirname, "packages/host/src/index.ts"),
     },
   },
   test: {
