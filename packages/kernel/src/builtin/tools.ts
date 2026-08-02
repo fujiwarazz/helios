@@ -1,9 +1,85 @@
 import { execa } from "execa";
+import { isIP } from "node:net";
 import { convert as htmlToText } from "html-to-text";
 import type { Tool, ToolContext } from "@helios/ports";
 
 // 六件套 + WebFetch + AskUserQuestion。均通过 CapabilityProvider 注册路径接入，
 // 仅在命名上豁免 provider 前缀（证明官方实现不走特权通道，只享命名豁免）。
+
+const BASH_TIMEOUT_DEFAULT = 120_000;
+const BASH_TIMEOUT_MAX = 600_000; // 硬上限，防 LLM 传超大 timeout 挂死
+const WEBFETCH_TIMEOUT = 15_000;
+const WEBFETCH_MAX_BYTES = 5 * 1024 * 1024; // 5MB，边读边截，不读全 body
+
+/** SSRF 防护：拒绝非 http(s)、以及指向本机/内网/云元数据的地址（字面 IP + localhost）。 */
+export function assertFetchUrlAllowed(raw: string): void {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`非法 URL：${raw}`);
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`仅允许 http/https：${u.protocol}`);
+  }
+  // 去方括号（IPv6）、去尾点（FQDN 规范化，如 "localhost."）。
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (host === "localhost") {
+    throw new Error(`拒绝访问本机地址（SSRF 防护）：${host}`);
+  }
+  // 仅当 host 确为字面 IP 时才做私网/本机段判断，避免 "fd.example.com"、
+  // "10.foo.com"、"fc-cdn.net" 等合法域名被前缀误伤。
+  const kind = isIP(host); // 0=非IP，4=IPv4，6=IPv6
+  if (kind === 4 && isPrivateIPv4(host)) {
+    throw new Error(`拒绝访问本机/内网地址（SSRF 防护）：${host}`);
+  }
+  if (kind === 6 && isLocalIPv6(host)) {
+    throw new Error(`拒绝访问本机/内网地址（SSRF 防护）：${host}`);
+  }
+}
+
+function isPrivateIPv4(ip: string): boolean {
+  return (
+    ip === "0.0.0.0" ||
+    ip === "169.254.169.254" || // 云元数据
+    ip.startsWith("127.") || // 回环
+    ip.startsWith("169.254.") || // link-local
+    ip.startsWith("10.") ||
+    ip.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip) // 172.16.0.0/12
+  );
+}
+
+function isLocalIPv6(ip: string): boolean {
+  return (
+    ip === "::1" || // 回环
+    ip === "::" ||
+    ip.startsWith("fc") || // 唯一本地地址 fc00::/7
+    ip.startsWith("fd") ||
+    ip.startsWith("fe80") // link-local
+  );
+}
+
+/** 边读边累加、达到上限即中止，避免大响应打满内存。 */
+async function readCapped(resp: Response, maxBytes: number): Promise<string> {
+  const reader = resp.body?.getReader();
+  if (!reader) return (await resp.text()).slice(0, maxBytes);
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      received += value.length;
+      if (received >= maxBytes) {
+        await reader.cancel();
+        break;
+      }
+    }
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 const bashTool: Tool = {
   name: "Bash",
@@ -18,12 +94,16 @@ const bashTool: Tool = {
   },
   async execute(input, ctx: ToolContext) {
     const { command, timeout } = input as { command: string; timeout?: number };
+    // timeout 缺省或 <=0（含 0 会被 execa 解读为"永不超时"）时回落默认值，再夹到硬上限。
+    const wanted = typeof timeout === "number" && timeout > 0 ? timeout : BASH_TIMEOUT_DEFAULT;
+    const cappedTimeout = Math.min(wanted, BASH_TIMEOUT_MAX);
     try {
       const res = await execa(command, {
         shell: true,
         cwd: ctx.workDir,
-        timeout: timeout ?? 120_000,
+        timeout: cappedTimeout,
         reject: false,
+        signal: ctx.signal, // cancel 时中断命令
       });
       const out = [res.stdout, res.stderr].filter(Boolean).join("\n");
       return { output: out || `(exit ${res.exitCode})`, isError: res.exitCode !== 0 };
@@ -151,6 +231,7 @@ const grepTool: Tool = {
       } catch {
         continue;
       }
+      if (content.includes("\u0000")) continue; // 跳过二进制文件（含 NUL 字节），避免乱码匹配 + DoS
       const lines = content.split("\n");
       for (let i = 0; i < lines.length; i++) {
         if (re.test(lines[i]!)) hits.push(`${f}:${i + 1}:${lines[i]}`);
@@ -170,15 +251,29 @@ const webFetchTool: Tool = {
     properties: { url: { type: "string" } },
     required: ["url"],
   },
-  async execute(input) {
+  async execute(input, ctx: ToolContext) {
     const { url } = input as { url: string };
     try {
-      const resp = await fetch(url);
-      const html = await resp.text();
+      assertFetchUrlAllowed(url); // SSRF：拒绝内网/本机/云元数据
+    } catch (err) {
+      return { output: err instanceof Error ? err.message : String(err), isError: true };
+    }
+    // 超时（15s）+ 组合外部 cancel 信号
+    const timer = new AbortController();
+    const t = setTimeout(() => timer.abort(), WEBFETCH_TIMEOUT);
+    const signals = [timer.signal, ctx.signal].filter(Boolean) as AbortSignal[];
+    const signal = typeof (AbortSignal as unknown as { any?: unknown }).any === "function"
+      ? (AbortSignal as unknown as { any(s: AbortSignal[]): AbortSignal }).any(signals)
+      : timer.signal;
+    try {
+      const resp = await fetch(url, { redirect: "follow", signal });
+      const html = await readCapped(resp, WEBFETCH_MAX_BYTES); // 边读边截，防内存打满
       const text = htmlToText(html, { wordwrap: false });
       return { output: text.slice(0, 50_000) };
     } catch (err) {
       return { output: err instanceof Error ? err.message : String(err), isError: true };
+    } finally {
+      clearTimeout(t);
     }
   },
 };

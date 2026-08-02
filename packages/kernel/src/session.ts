@@ -62,6 +62,8 @@ export class Session {
   private readonly turnLog: TurnRecord[] = [];
   /** 历史压缩后累积的摘要文本，随后续每个 run 注入 system（与 memory 召回同路径） */
   private compactedSummary = "";
+  /** 当前 run 的中断控制器，其 signal 贯通到工具（Bash/WebFetch），支持 cancel。 */
+  private currentAbort: AbortController | null = null;
   private createdAt = Date.now();
   private title = "";
 
@@ -79,6 +81,11 @@ export class Session {
     for (const l of this.listeners) l(event);
   }
 
+  /** 中断当前 run：触发 signal，让正在执行的工具（Bash/WebFetch）尽快停止。 */
+  cancel(): void {
+    this.currentAbort?.abort();
+  }
+
   getHistory(): Message[] {
     return [...this.history];
   }
@@ -90,6 +97,9 @@ export class Session {
     const runIndex = this.runIndex++;
     const before = this.history.length;
     if (!this.title) this.title = text.slice(0, 60);
+
+    const abort = new AbortController();
+    this.currentAbort = abort;
 
     this.emit({ type: "agent_start", runId });
 
@@ -114,6 +124,7 @@ export class Session {
     let runError: string | undefined; // Bug 3：LLM 流错误信息，用于 agent_end 优雅标注
 
     while (turnIndex < this.maxTurns) {
+      if (abort.signal.aborted) break; // 已中断：不再开新 turn
       const turnId = `${this.id}-${runIndex}-${turnIndex}`;
       turnIds.push(turnId);
       // turn 前快照，供回溯。同时记录此刻历史长度，回溯时据此截断。
@@ -121,10 +132,15 @@ export class Session {
       const checkpointRef = await ports.checkpoint.snapshot(turnId);
       this.emit({ type: "turn_start", turnId });
 
-      const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = await this.streamAssistant(
-        turnId,
-        system,
-      );
+      let streamed: Awaited<ReturnType<Session["streamAssistant"]>>;
+      try {
+        streamed = await this.streamAssistant(turnId, system);
+      } catch (err) {
+        // 中断导致的流异常（AbortError）视为正常停止，不向上抛
+        if (abort.signal.aborted) break;
+        throw err;
+      }
+      const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = streamed;
       assistantMsg.turnId = turnId;
 
       // Bug 7：只有非空 assistant 消息才入历史/持久化，避免 content:[] 触发下游 API 报错。
@@ -179,6 +195,7 @@ export class Session {
     }
 
     const newMessages = this.history.slice(before);
+    if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",
       runId,
@@ -217,6 +234,7 @@ export class Session {
     const gen = provider.streamMessage(this.history, this.opts.tools.list(), {
       ...llmOptions,
       system,
+      signal: this.currentAbort?.signal,
     });
 
     for await (const ev of gen) {
@@ -286,6 +304,7 @@ export class Session {
       workDir,
       logger,
       ports,
+      signal: this.currentAbort?.signal,
       askQuestion: this.opts.askQuestion,
     };
     const resultBlocks: ContentBlock[] = [];

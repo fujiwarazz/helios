@@ -42,14 +42,17 @@ class OpenAIProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
-    const stream = await this.client.chat.completions.create({
-      model: opts.model ?? this.defaultModel,
-      max_tokens: opts.maxTokens ?? 4096,
-      temperature: opts.temperature,
-      messages: toOpenAIMessages(messages, opts.system),
-      tools: tools.length ? toOpenAITools(tools) : undefined,
-      stream: true,
-    });
+    const stream = await this.client.chat.completions.create(
+      {
+        model: opts.model ?? this.defaultModel,
+        max_tokens: opts.maxTokens ?? 4096,
+        temperature: opts.temperature,
+        messages: toOpenAIMessages(messages, opts.system),
+        tools: tools.length ? toOpenAITools(tools) : undefined,
+        stream: true,
+      },
+      { signal: opts.signal },
+    );
     yield* mapOpenAIStream(stream as AsyncIterable<OpenAIChunk>);
   }
 }
