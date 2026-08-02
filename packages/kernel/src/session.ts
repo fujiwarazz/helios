@@ -111,6 +111,7 @@ export class Session {
     const turnIds: string[] = [];
     let turnIndex = 0;
     let pendingTurnLeadMessages: Message[] = [userMsg];
+    let runError: string | undefined; // Bug 3：LLM 流错误信息，用于 agent_end 优雅标注
 
     while (turnIndex < this.maxTurns) {
       const turnId = `${this.id}-${runIndex}-${turnIndex}`;
@@ -120,18 +121,31 @@ export class Session {
       const checkpointRef = await ports.checkpoint.snapshot(turnId);
       this.emit({ type: "turn_start", turnId });
 
-      const { assistantMsg, stopReason, toolUseBlocks } = await this.streamAssistant(
+      const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = await this.streamAssistant(
         turnId,
         system,
       );
       assistantMsg.turnId = turnId;
-      this.history.push(assistantMsg);
 
-      const turnMessages: Message[] = [...pendingTurnLeadMessages, assistantMsg];
+      // Bug 7：只有非空 assistant 消息才入历史/持久化，避免 content:[] 触发下游 API 报错。
+      const turnMessages: Message[] = [...pendingTurnLeadMessages];
       pendingTurnLeadMessages = [];
+      const assistantHasContent = Array.isArray(assistantMsg.content) && assistantMsg.content.length > 0;
+      if (assistantHasContent) {
+        this.history.push(assistantMsg);
+        turnMessages.push(assistantMsg);
+      }
+
+      // Bug 3：LLM 流中途报错 → 优雅结束本 run（保证 agent_end 一定 emit、历史一致），不 throw。
+      if (streamError) {
+        await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
+        this.emit({ type: "turn_end", turnId, toolResults: [] });
+        runError = streamError;
+        break;
+      }
 
       if (toolUseBlocks.length > 0) {
-        const { toolResultMsg, records } = await this.executeTools(turnId, toolUseBlocks);
+        const { toolResultMsg, records } = await this.executeTools(turnId, toolUseBlocks, parseErrorIds);
         this.history.push(toolResultMsg);
         turnMessages.push(toolResultMsg);
         await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
@@ -155,12 +169,24 @@ export class Session {
 
       await this.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, historyLenBefore, messages: turnMessages });
       this.emit({ type: "turn_end", turnId, toolResults: [] });
-      void stopReason;
       break;
     }
 
+    // Bug 5：因达到 turn 上限（而非 break 自然结束）而退出循环 → 记录并在 agent_end 标注，避免静默截断。
+    const reachedMaxTurns = turnIndex >= this.maxTurns;
+    if (reachedMaxTurns) {
+      logger.warn(`run ${runId} 达到 turn 上限 ${this.maxTurns}，提前结束`);
+    }
+
     const newMessages = this.history.slice(before);
-    this.emit({ type: "agent_end", runId, turnIds, newMessages });
+    this.emit({
+      type: "agent_end",
+      runId,
+      turnIds,
+      newMessages,
+      error: runError,
+      reachedMaxTurns: reachedMaxTurns || undefined,
+    });
     logger.debug(`run ${runId} 完成，共 ${turnIds.length} 个 turn`);
     return newMessages;
   }
@@ -168,7 +194,15 @@ export class Session {
   private async streamAssistant(
     turnId: string,
     system: string,
-  ): Promise<{ assistantMsg: Message; stopReason: StopReason; toolUseBlocks: Extract<ContentBlock, { type: "tool_use" }>[] }> {
+  ): Promise<{
+    assistantMsg: Message;
+    stopReason: StopReason;
+    toolUseBlocks: Extract<ContentBlock, { type: "tool_use" }>[];
+    /** LLM 流中途报错时的信息（Bug 3）；正常时 undefined。 */
+    streamError?: string;
+    /** 参数 JSON 解析失败的 tool_use id 集合（Bug 4），executeTools 据此回传错误。 */
+    parseErrorIds: Set<string>;
+  }> {
     const { ports, logger, llmOptions } = this.opts;
     const provider = ports.llm.get(llmOptions.provider);
     const messageId = uid("msg");
@@ -178,6 +212,7 @@ export class Session {
     const toolCalls = new Map<string, { name: string; args: string }>();
     const order: string[] = [];
     let stopReason: StopReason = "end_turn";
+    let streamError: string | undefined;
 
     const gen = provider.streamMessage(this.history, this.opts.tools.list(), {
       ...llmOptions,
@@ -205,36 +240,46 @@ export class Session {
           stopReason = ev.stopReason;
           break;
         case "error":
+          // Bug 3：不再 throw 穿透整个 run，记录错误并中断流，交由 sendMessage 优雅收尾。
           logger.error(`LLM 流错误：${ev.error}`);
-          throw new Error(`LLM 流错误：${ev.error}`);
+          streamError = ev.error;
+          break;
       }
+      if (streamError) break;
     }
 
     const content: ContentBlock[] = [];
     if (textAccum) content.push({ type: "text", text: textAccum });
+
+    // 流错误时丢弃可能被截断的残缺 tool_use（执行会误伤），仅保留已累计文本。
     const toolUseBlocks: Extract<ContentBlock, { type: "tool_use" }>[] = [];
-    for (const id of order) {
-      const tc = toolCalls.get(id)!;
-      const input = parseJsonSafe(tc.args);
-      const block: Extract<ContentBlock, { type: "tool_use" }> = {
-        type: "tool_use",
-        id,
-        name: tc.name,
-        input,
-      };
-      content.push(block);
-      toolUseBlocks.push(block);
+    const parseErrorIds = new Set<string>();
+    if (!streamError) {
+      for (const id of order) {
+        const tc = toolCalls.get(id)!;
+        const parsed = parseJsonSafe(tc.args);
+        if (!parsed.ok) parseErrorIds.add(id); // Bug 4：标记解析失败
+        const block: Extract<ContentBlock, { type: "tool_use" }> = {
+          type: "tool_use",
+          id,
+          name: tc.name,
+          input: parsed.value,
+        };
+        content.push(block);
+        toolUseBlocks.push(block);
+      }
     }
     if (toolUseBlocks.length > 0) stopReason = "tool_use";
 
     const assistantMsg: Message = { id: messageId, role: "assistant", content };
     this.emit({ type: "message_end", messageId, role: "assistant", stopReason });
-    return { assistantMsg, stopReason, toolUseBlocks };
+    return { assistantMsg, stopReason, toolUseBlocks, streamError, parseErrorIds };
   }
 
   private async executeTools(
     turnId: string,
     toolUseBlocks: Extract<ContentBlock, { type: "tool_use" }>[],
+    parseErrorIds: Set<string> = new Set(),
   ): Promise<{ toolResultMsg: Message; records: ToolResultRecord[] }> {
     const { ports, hooks, logger, workDir } = this.opts;
     const toolCtx: ToolContext = {
@@ -250,6 +295,17 @@ export class Session {
       let input = block.input;
       let output: unknown;
       let isError = false;
+
+      // Bug 4：参数 JSON 解析失败的工具不执行，直接回传错误让 LLM 重试。
+      if (parseErrorIds.has(block.id)) {
+        output = "工具参数 JSON 解析失败，请检查参数格式后重试。";
+        isError = true;
+        this.emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input });
+        this.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
+        resultBlocks.push({ type: "tool_result", toolUseId: block.id, output, isError });
+        records.push({ toolUseId: block.id, name: block.name, output, isError });
+        continue;
+      }
 
       // PreToolUse
       const pre = await hooks.runPreToolUse({ toolName: block.name, input });
@@ -295,9 +351,8 @@ export class Session {
         }
       }
 
-      if (this.listeners.size > 0) {
-        this.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
-      }
+      // Bug 6：end 与 start 成对无条件 emit（emit 很便宜），避免中途订阅收到不成对事件。
+      this.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
       resultBlocks.push({ type: "tool_result", toolUseId: block.id, output, isError });
       records.push({ toolUseId: block.id, name: block.name, output, isError });
     }
@@ -463,11 +518,16 @@ function approxTokens(messages: Message[]): number {
   return Math.ceil(chars / 4);
 }
 
-function parseJsonSafe(s: string): unknown {
-  if (!s || !s.trim()) return {};
+/**
+ * 解析 tool_use 参数 JSON。空参数视为合法（无参工具）；
+ * 非法 JSON（流式拼接被截断等）返回 ok:false，由 executeTools 回传错误让 LLM 重试，
+ * 而非静默吞成 {} 让工具拿空参数硬跑（Bug 4）。
+ */
+function parseJsonSafe(s: string): { ok: boolean; value: unknown } {
+  if (!s || !s.trim()) return { ok: true, value: {} };
   try {
-    return JSON.parse(s);
+    return { ok: true, value: JSON.parse(s) };
   } catch {
-    return {};
+    return { ok: false, value: {} };
   }
 }

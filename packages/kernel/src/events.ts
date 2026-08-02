@@ -13,7 +13,16 @@ export type AgentEvent =
   | { type: "compact_start"; messageCount: number }
   | { type: "compact_end"; summaryLength: number; remaining: number }
   | { type: "rollback"; turnId: string; historyLength: number }
-  | { type: "agent_end"; runId: string; turnIds: string[]; newMessages: Message[] };
+  | {
+      type: "agent_end";
+      runId: string;
+      turnIds: string[];
+      newMessages: Message[];
+      /** run 因 LLM 流错误优雅终止时的错误信息（Bug 3）；正常结束时为 undefined */
+      error?: string;
+      /** run 因达到 turn 上限而提前结束（Bug 5）；自然结束时为 undefined */
+      reachedMaxTurns?: boolean;
+    };
 
 export interface ToolResultRecord {
   toolUseId: string;
