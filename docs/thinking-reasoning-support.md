@@ -65,9 +65,9 @@ export interface LLMOptions {
 - **流式映射**（index.ts，现有 content_block 分发处）：
   - `content_block_delta.thinking_delta` → `{ type: "thinking-delta", text }`
   - `content_block_delta.signature_delta` → `{ type: "thinking-signature", signature }`
-  - `redacted_thinking` 块：当作不透明块累积（内容已加密，不解析）——可先落成一个带占位文本的 thinking 块，标注 redacted。
-- **历史回传**（convert.ts `toAnthropicBlocks`）：把 helios 的 `thinking` ContentBlock 还原成 Anthropic `thinking` 块（带 signature），且**放在该 assistant 消息内容块的最前面**（Anthropic 要求 thinking 在 text/tool_use 之前）。
-- **cache 断点避让**（convert.ts `applyCacheBreakpoints:120-133`）：确保断点不落在 thinking 块上（Anthropic 禁止 thinking 块带 cache_control）——当前逻辑取"最后一个块"，需加判断：若目标块是 thinking 则前移到上一个非 thinking 块。
+  - `redacted_thinking` 块：**当前降级为不透传（静默丢弃）**——统一 StreamEvent 尚无对应事件，opaque 保真透传需新增 StreamEvent/ContentBlock，对罕见场景不成比例，暂不实现（见「已知限制」S2）。
+- **历史回传**（convert.ts `toAnthropicBlocks`）：把 helios 的 `thinking` ContentBlock 还原成 Anthropic `thinking` 块（带 signature），且**放在该 assistant 消息内容块的最前面**（Anthropic 要求 thinking 在 text/tool_use 之前）。无 signature 的 thinking 块无法通过校验，直接丢弃（见「已知限制」S1）。
+- **cache 断点避让**：当前 main 基线的 llm-anthropic **不含 cache_control 逻辑**（`applyCacheBreakpoints` 是 branch-tree-cache 分支才引入的），故本期无 thinking+cache 冲突、无需处理。⚠️ 待 branch-tree-cache 合并后，需补一句「cache 断点不落在 thinking 块上」（Anthropic 禁止 thinking 块带 cache_control）。
 
 ### 2.3 llm-openai 适配（`stream.ts` + `convert.ts`）
 
@@ -80,7 +80,7 @@ export interface LLMOptions {
 - 消费 `thinking-delta`：累积进一个 `thinking` ContentBlock（与 text 块并列，先于 tool_use）。
 - 消费 `thinking-signature`：写入该 thinking 块的 `signature`。
 - `message_update` 事件已携带原始 StreamEvent，thinking-delta 自然流到消费方（UI），**无需新增 AgentEvent 类型**。
-- **空响应判定**：只有 thinking、无 text 无 tool_use 时，参照 valos 视为"无有效正文"。当前 Bug7 的 `assistantHasContent` 判断需排除 thinking 块（thinking 不算有效正文），避免只思考不回答的空轮被当正常结束。
+- **空响应判定**：只有 thinking、无 text 无 tool_use 时视为"无有效正文"，`assistantHasContent` 排除 thinking 块。语义为**丢弃该 assistant 消息 + 本 run 正常结束（不重试）**——区别于 valos 的判空重试；helios 暂不引入重试机制，保持最小实现。
 
 ### 2.5 消费方 / UI
 
@@ -91,7 +91,7 @@ export interface LLMOptions {
 ## 三、任务拆分（建议一个分支收口）
 
 1. **ports**：`ContentBlock` 加 thinking 块；`StreamEvent` 加 thinking-delta / thinking-signature；`LLMOptions` 加 thinking。
-2. **llm-anthropic**：请求侧 thinking 开关 + temperature 互斥；流式映射 thinking_delta/signature_delta/redacted；`toAnthropicBlocks` 回传 thinking 块（前置）；`applyCacheBreakpoints` 避让 thinking。
+2. **llm-anthropic**：请求侧 thinking 开关 + temperature 互斥；流式映射 thinking_delta/signature_delta（redacted_thinking 降级丢弃）；`toAnthropicBlocks` 回传 thinking 块（前置、无签名丢弃）。cache 避让待 branch-tree-cache 合并后补。
 3. **llm-openai**：`mapOpenAIStream` 映射 reasoning_content；请求侧丢弃历史 thinking。
 4. **kernel/session**：streamAssistant 累积 thinking 块 + signature；`assistantHasContent` 排除 thinking。
 5. **测试**：
@@ -108,5 +108,13 @@ export interface LLMOptions {
 - **不做 reasoning_effort 数值调强**（仅 enabled + budgetTokens）。
 - **OpenAI 协议后端不回传历史 reasoning**（无 signature、后端普遍忽略）。
 - **不做 prompt 模拟**：仍假定原生能力。
-- **redacted_thinking** 仅做不透明保真透传，不尝试解析内部结构。
 - 与 `docs/shell-port-and-persistent-cwd.md` 相互独立，可各自单独落地。
+
+---
+
+## 五、已知限制（CR 后如实记录）
+
+- **S1 无签名 thinking + 同轮 tool_use 的 400 边界**：`toAnthropicBlocks` 丢弃无 signature 的 thinking 块。当 thinking 开启且同一 assistant 消息含 tool_use 时，Anthropic 要求 tool_use 前有带 signature 的 thinking 块——若历史 thinking 无 signature（如 OpenAI 路径产出后切到 Anthropic），丢弃会致该轮缺失 thinking → 可能 400。无法伪造 signature，故仅作限制记录；**单 provider 会话不会触发**（signature 必随 thinking 到达）。
+- **S2 redacted_thinking 不透传**：`redacted_thinking` 块当前静默丢弃（统一协议无对应事件）。含 tool_use 时同 S1 的 400 边界。opaque 保真透传需新增 StreamEvent/ContentBlock，对罕见场景不成比例，暂降级。
+- **N1 单 thinking 块**：本轮所有 thinking-delta 合并为单块、signature 取最后一个；Anthropic interleaved thinking（beta，多块各自 signature）暂不支持。
+- **N3 thinking-only = 丢弃 + 正常结束**：不重试（区别于 valos 判空重试）。

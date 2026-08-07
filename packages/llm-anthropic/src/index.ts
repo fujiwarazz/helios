@@ -80,6 +80,10 @@ class AnthropicProvider implements LLMProvider {
               indexToToolId.set(event.index, block.id);
               yield { type: "tool-call-start", id: block.id, name: block.name };
             }
+            // ⚠️ 已知降级（S2）：redacted_thinking 块（type=redacted_thinking，内容在 data 字段、
+            // 无 delta）当前不透传——统一 StreamEvent 尚无对应事件，故静默丢弃。若该轮含 tool_use，
+            // 同样存在 thinking-precede-tool_use 的 400 边界（见 convert.ts S1 注释）。opaque 保真透传
+            // 需新增 StreamEvent/ContentBlock，对罕见场景不成比例，暂作降级并在 doc 记录。
             break;
           }
           case "content_block_delta": {
