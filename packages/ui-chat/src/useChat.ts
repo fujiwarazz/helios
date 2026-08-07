@@ -81,10 +81,11 @@ export function reduce(
 
     case "message_update": {
       // 文本与思考分别累积；其余 delta（工具）走 tool_execution_*。
-      const isText = event.delta.type === "text-delta";
-      const isThinking = event.delta.type === "thinking-delta";
-      if (!isText && !isThinking) return state;
-      const chunk = event.delta.text;
+      // 直接在 event.delta.type 上判别以便 TS 收窄到带 .text 的成员。
+      const d = event.delta;
+      if (d.type !== "text-delta" && d.type !== "thinking-delta") return state;
+      const isThinking = d.type === "thinking-delta";
+      const chunk = d.text;
       let found = false;
       const messages = state.messages.map((m) => {
         if (m.id !== event.messageId) return m;
