@@ -117,6 +117,11 @@ export class Session {
 
     const userMsg: Message = { id: uid("msg"), role: "user", content: text };
     this.history.push(userMsg);
+    // 广播用户消息事件：让订阅端(UI)在 run 进行中即可显示用户气泡，
+    // 无需等 run 结束 getHistory。用户文本不流式，一次性 start+delta+end。
+    this.emit({ type: "message_start", messageId: userMsg.id, role: "user", turnId: "" });
+    this.emit({ type: "message_update", messageId: userMsg.id, delta: { type: "text-delta", text } });
+    this.emit({ type: "message_end", messageId: userMsg.id, role: "user" });
 
     const turnIds: string[] = [];
     let turnIndex = 0;
