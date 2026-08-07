@@ -82,10 +82,12 @@ class AnthropicProvider implements LLMProvider {
           }
           case "content_block_delta": {
             const delta = event.delta;
+            // thinking_delta 兼容旧版 SDK 类型(0.32 未收录该 delta 类型):按运行时字段判断。
+            const loose = delta as unknown as { type: string; thinking?: string };
             if (delta.type === "text_delta") {
               yield { type: "text-delta", text: delta.text };
-            } else if (delta.type === "thinking_delta") {
-              yield { type: "thinking-delta", text: delta.thinking };
+            } else if (loose.type === "thinking_delta") {
+              yield { type: "thinking-delta", text: loose.thinking ?? "" };
             } else if (delta.type === "input_json_delta") {
               const id = indexToToolId.get(event.index);
               if (id) yield { type: "tool-call-delta", id, argsDelta: delta.partial_json };
