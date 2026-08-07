@@ -23,6 +23,7 @@ export type Role = "system" | "user" | "assistant" | "toolResult";
 
 export type ContentBlock =
   | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature?: string }
   | { type: "tool_use"; id: string; name: string; input: unknown }
   | { type: "tool_result"; toolUseId: string; output: unknown; isError?: boolean };
 
@@ -94,6 +95,10 @@ export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop";
 
 export type StreamEvent =
   | { type: "text-delta"; text: string }
+  /** 思考正文增量（Anthropic thinking_delta / OpenAI 协议 reasoning_content 归一化后）。 */
+  | { type: "thinking-delta"; text: string }
+  /** Anthropic thinking 块的完整性签名；回传该轮 thinking 块时必需，其它厂商无此事件。 */
+  | { type: "thinking-signature"; signature: string }
   | { type: "tool-call-start"; id: string; name: string }
   | { type: "tool-call-delta"; id: string; argsDelta: string }
   | { type: "tool-call-end"; id: string }
@@ -108,6 +113,12 @@ export interface LLMOptions {
   maxTokens?: number;
   temperature?: number;
   signal?: AbortSignal;
+  /**
+   * 扩展思考（extended thinking / reasoning）开关。由 provider 侧决定如何落地：
+   * Anthropic 转成 thinking 请求参数（与 temperature 互斥）；OpenAI 协议后端目前忽略
+   * （是否吐 reasoning 由后端默认策略决定）。
+   */
+  thinking?: { enabled: boolean; budgetTokens?: number };
 }
 
 // ---------------------------------------------------------------------------
