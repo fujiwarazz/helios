@@ -45,14 +45,21 @@ class AnthropicProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
+    const thinkingOn = opts.thinking?.enabled === true;
+    const budget = opts.thinking?.budgetTokens ?? 2048;
+    // thinking 开启时:max_tokens 必须 > budget；temperature 必须为默认(不可自定义)。
+    const maxTokens = opts.maxTokens ?? 4096;
     const stream = await this.client.messages.create(
       {
         model: opts.model ?? this.defaultModel,
-        max_tokens: opts.maxTokens ?? 4096,
-        temperature: opts.temperature,
+        max_tokens: thinkingOn ? Math.max(maxTokens, budget + 1024) : maxTokens,
+        temperature: thinkingOn ? undefined : opts.temperature,
         system: opts.system,
         messages: toAnthropicMessages(messages),
         tools: tools.length ? toAnthropicTools(tools) : undefined,
+        ...(thinkingOn
+          ? { thinking: { type: "enabled" as const, budget_tokens: budget } }
+          : {}),
         stream: true,
       },
       { signal: opts.signal },
@@ -77,6 +84,8 @@ class AnthropicProvider implements LLMProvider {
             const delta = event.delta;
             if (delta.type === "text_delta") {
               yield { type: "text-delta", text: delta.text };
+            } else if (delta.type === "thinking_delta") {
+              yield { type: "thinking-delta", text: delta.thinking };
             } else if (delta.type === "input_json_delta") {
               const id = indexToToolId.get(event.index);
               if (id) yield { type: "tool-call-delta", id, argsDelta: delta.partial_json };

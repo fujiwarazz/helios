@@ -20,7 +20,11 @@ async function main(): Promise<void> {
   const kernel = new Kernel({
     workDir: REPO_ROOT,
     manifest,
-    llmOptions: { provider: "anthropic" },
+    llmOptions: {
+      provider: "anthropic",
+      // 开启扩展思考：流中会带 thinking-delta，前端渲染可折叠「思考过程」块。
+      thinking: { enabled: true, budgetTokens: 2048 },
+    },
     // 裸包名从本 app 依赖解析(manifest 里的 @helios/* 是 @helios/web 的 workspace 依赖)。
     resolvePackage: (spec) => import.meta.resolve(spec),
   });

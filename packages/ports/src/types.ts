@@ -94,6 +94,7 @@ export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop";
 
 export type StreamEvent =
   | { type: "text-delta"; text: string }
+  | { type: "thinking-delta"; text: string }
   | { type: "tool-call-start"; id: string; name: string }
   | { type: "tool-call-delta"; id: string; argsDelta: string }
   | { type: "tool-call-end"; id: string }
@@ -108,6 +109,8 @@ export interface LLMOptions {
   maxTokens?: number;
   temperature?: number;
   signal?: AbortSignal;
+  /** 扩展思考（extended thinking）。开启后流中会有 thinking-delta；budgetTokens 为思考预算。 */
+  thinking?: { enabled: boolean; budgetTokens?: number };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,315 @@
+/* ==========================================================================
+ * apps/web/src/styles/theme.css
+ * 设计 token(Anthropic 暖白体系,浅色) + 全局重置 + 应用外壳 + 侧边栏。
+ * ========================================================================== */
+
+:root {
+  /* 色板 —— 暖白底 / 近黑字 / 陶土强调,克制使用 */
+  --h-bg: #faf7f0;
+  --h-surface: #fffdf8;
+  --h-sidebar: #f5f1e8;
+  --h-text: #1a1a18;
+  --h-text-muted: #6b6b63;
+  --h-text-faint: #9a9a90;
+  --h-border: #e8e1d4;
+  --h-border-strong: #d8cfbe;
+  --h-accent: #c15f3c;
+  --h-accent-ink: #a44e30;
+  --h-accent-weak: #f3e3da;
+  --h-ok: #4a7c59;
+  --h-error: #b3402e;
+  --h-error-weak: #f5e0da;
+
+  /* 字号 */
+  --h-fs-xs: 11px;
+  --h-fs-sm: 13px;
+  --h-fs-base: 15px;
+  --h-fs-lg: 18px;
+  --h-fs-xl: 22px;
+
+  /* 间距 */
+  --h-space-1: 4px;
+  --h-space-2: 8px;
+  --h-space-3: 12px;
+  --h-space-4: 16px;
+  --h-space-5: 24px;
+  --h-space-6: 32px;
+
+  /* 圆角 */
+  --h-radius-sm: 4px;
+  --h-radius-md: 6px;
+  --h-radius-lg: 8px;
+
+  /* 版心 */
+  --h-content-max: 760px;
+
+  --h-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --h-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: var(--h-font);
+  color: var(--h-text);
+  background: var(--h-bg);
+  font-size: var(--h-fs-base);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* --- 应用外壳:侧边栏 + 主区 --- */
+.helios-app {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100%;
+}
+.helios-app[data-collapsed="true"] {
+  grid-template-columns: 56px 1fr;
+}
+.helios-main {
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--h-bg);
+}
+
+/* --- 侧边栏 --- */
+.helios-sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--h-sidebar);
+  border-right: 1px solid var(--h-border);
+  padding: var(--h-space-3);
+  gap: var(--h-space-3);
+  overflow: hidden;
+}
+.helios-sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.helios-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--h-space-2);
+  font-weight: 700;
+  font-size: var(--h-fs-lg);
+}
+.helios-brand-mark {
+  color: var(--h-accent);
+}
+.helios-collapse {
+  border: none;
+  background: transparent;
+  color: var(--h-text-faint);
+  cursor: pointer;
+  font-size: var(--h-fs-base);
+  padding: var(--h-space-1) var(--h-space-2);
+  border-radius: var(--h-radius-sm);
+}
+.helios-collapse:hover {
+  background: var(--h-border);
+  color: var(--h-text);
+}
+
+.helios-new-chat {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--h-space-2);
+  border: 1px solid var(--h-accent);
+  background: var(--h-surface);
+  color: var(--h-accent-ink);
+  font-size: var(--h-fs-sm);
+  font-weight: 600;
+  padding: var(--h-space-2) var(--h-space-3);
+  border-radius: var(--h-radius-md);
+  cursor: pointer;
+}
+.helios-new-chat:hover {
+  background: var(--h-accent-weak);
+}
+
+.helios-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.helios-nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--h-space-3);
+  border: none;
+  background: transparent;
+  color: var(--h-text-muted);
+  font-size: var(--h-fs-sm);
+  padding: var(--h-space-2) var(--h-space-3);
+  border-radius: var(--h-radius-md);
+  cursor: pointer;
+  text-align: left;
+}
+.helios-nav-item:hover {
+  background: var(--h-border);
+  color: var(--h-text);
+}
+.helios-nav-item[data-active="true"] {
+  background: var(--h-accent-weak);
+  color: var(--h-accent-ink);
+  font-weight: 600;
+}
+.helios-nav-icon {
+  width: 18px;
+  text-align: center;
+  flex: none;
+}
+
+.helios-sidebar-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 0 calc(-1 * var(--h-space-1));
+  padding: 0 var(--h-space-1);
+}
+
+/* 会话列表 */
+.helios-sessions-empty {
+  color: var(--h-text-faint);
+  font-size: var(--h-fs-sm);
+  padding: var(--h-space-3);
+}
+.helios-session-group {
+  margin-bottom: var(--h-space-3);
+}
+.helios-session-group-label {
+  font-size: var(--h-fs-xs);
+  color: var(--h-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: var(--h-space-2) var(--h-space-2) var(--h-space-1);
+}
+.helios-session-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: var(--h-space-2);
+  border-radius: var(--h-radius-md);
+  cursor: pointer;
+  text-align: left;
+}
+.helios-session-item:hover {
+  background: var(--h-border);
+}
+.helios-session-item[data-active="true"] {
+  background: var(--h-accent-weak);
+}
+.helios-session-title {
+  font-size: var(--h-fs-sm);
+  color: var(--h-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.helios-session-time {
+  font-size: var(--h-fs-xs);
+  color: var(--h-text-faint);
+}
+
+.helios-conn-status {
+  display: flex;
+  align-items: center;
+  gap: var(--h-space-2);
+  font-size: var(--h-fs-xs);
+  color: var(--h-text-muted);
+  padding: var(--h-space-2);
+  border-top: 1px solid var(--h-border);
+}
+.helios-conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--h-text-faint);
+  flex: none;
+}
+.helios-conn-status[data-state="open"] .helios-conn-dot {
+  background: var(--h-ok);
+}
+.helios-conn-status[data-state="connecting"] .helios-conn-dot {
+  background: var(--h-accent);
+}
+.helios-conn-status[data-state="closed"] .helios-conn-dot {
+  background: var(--h-error);
+}
+
+/* --- 占位页 / Ports 页 --- */
+.helios-page {
+  max-width: var(--h-content-max);
+  margin: 0 auto;
+  padding: var(--h-space-6) var(--h-space-5);
+  height: 100%;
+  overflow-y: auto;
+}
+.helios-page-title {
+  font-size: var(--h-fs-xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.helios-page-hint {
+  color: var(--h-text-muted);
+  font-size: var(--h-fs-sm);
+  margin-top: var(--h-space-2);
+}
+.helios-ports {
+  display: flex;
+  flex-direction: column;
+  gap: var(--h-space-3);
+  margin-top: var(--h-space-5);
+}
+.helios-port-card {
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-md);
+  background: var(--h-surface);
+  padding: var(--h-space-3) var(--h-space-4);
+}
+.helios-port-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.helios-port-name {
+  font-family: var(--h-font-mono);
+  font-weight: 600;
+}
+.helios-port-count {
+  font-size: var(--h-fs-xs);
+  color: var(--h-text-faint);
+}
+.helios-port-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--h-space-1);
+  margin-top: var(--h-space-2);
+}
+.helios-port-tool {
+  font-family: var(--h-font-mono);
+  font-size: var(--h-fs-xs);
+  background: var(--h-sidebar);
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-sm);
+  padding: 2px var(--h-space-2);
+  color: var(--h-text-muted);
+}
