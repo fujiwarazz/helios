@@ -302,16 +302,21 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
    */
   const mergeHistory = useCallback(
     (aliveRef: { alive: boolean }, mode: "merge" | "replace" = "merge") => {
-      void client.getHistory().then((history) => {
-        if (!aliveRef.alive) return;
-        setState((s) => {
-          const hist = messagesToViews(history, renderTool);
-          if (mode === "replace") return { ...s, messages: hist };
-          const histIds = new Set(hist.map((m) => m.id));
-          const streamed = s.messages.filter((m) => !histIds.has(m.id));
-          return { ...s, messages: [...hist, ...streamed] };
+      void client
+        .getHistory()
+        .then((history) => {
+          if (!aliveRef.alive) return;
+          setState((s) => {
+            const hist = messagesToViews(history, renderTool);
+            if (mode === "replace") return { ...s, messages: hist };
+            const histIds = new Set(hist.map((m) => m.id));
+            const streamed = s.messages.filter((m) => !histIds.has(m.id));
+            return { ...s, messages: [...hist, ...streamed] };
+          });
+        })
+        .catch(() => {
+          /* getHistory 失败(重连/断线瞬间):忽略,下次事件或重连会再拉。 */
         });
-      });
     },
     [client, renderTool],
   );

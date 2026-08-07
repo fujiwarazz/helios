@@ -73,15 +73,8 @@ function MessageBubble({
       ) : null}
       {msg.text ? (
         <div className="helios-msg-text">
-          {/* 流式中用纯文本(平滑逐字),turn 结束后再切 markdown——避免每个 delta
-              重解析整段导致的"整块跳动"。user 消息恒为纯文本。 */}
-          {isAssistant && !streaming ? (
-            <Markdown>{msg.text}</Markdown>
-          ) : isAssistant ? (
-            <span className="helios-stream-text">{msg.text}</span>
-          ) : (
-            msg.text
-          )}
+          {/* assistant 全程 markdown 渲染(含流式);user 恒纯文本。 */}
+          {isAssistant ? <Markdown>{msg.text}</Markdown> : msg.text}
           {showCursor ? <span className="helios-cursor" aria-hidden /> : null}
         </div>
       ) : showCursor ? (
