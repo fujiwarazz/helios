@@ -4,7 +4,7 @@
 // 必须幂等 / 容忍乱序(按 messageId、toolUseId 定位,重复不重复插入)。
 // ============================================================================
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AgentEvent } from "@helios/kernel";
 import type {
   Message,
@@ -17,6 +17,7 @@ import type {
   ConnectionState,
   ChatMessageView,
   ToolCallView,
+  AskQuestion,
 } from "./types";
 
 /** 可选的工具渲染器:把工具名/入参/状态/输出映射成结构化描述。 */
@@ -73,18 +74,24 @@ export function reduce(
         role: event.role,
         text: "",
         tools: [],
+        turnId: event.role === "assistant" ? event.turnId : undefined,
       };
       return { ...state, messages: [...state.messages, msg] };
     }
 
     case "message_update": {
-      if (event.delta.type !== "text-delta") return state; // 工具走 tool_execution_*
-      const text = event.delta.text;
+      // 文本与思考分别累积；其余 delta（工具）走 tool_execution_*。
+      const isText = event.delta.type === "text-delta";
+      const isThinking = event.delta.type === "thinking-delta";
+      if (!isText && !isThinking) return state;
+      const chunk = event.delta.text;
       let found = false;
       const messages = state.messages.map((m) => {
         if (m.id !== event.messageId) return m;
         found = true;
-        return { ...m, text: m.text + text };
+        return isThinking
+          ? { ...m, thinking: (m.thinking ?? "") + chunk }
+          : { ...m, text: m.text + chunk };
       });
       if (found) return { ...state, messages };
       // 容忍乱序:update 早于 start → 先建一条 assistant 消息。
@@ -92,7 +99,9 @@ export function reduce(
         ...state,
         messages: [
           ...state.messages,
-          { id: event.messageId, role: "assistant", text, tools: [] },
+          isThinking
+            ? { id: event.messageId, role: "assistant", text: "", thinking: chunk, tools: [] }
+            : { id: event.messageId, role: "assistant", text: chunk, tools: [] },
         ],
       };
     }
@@ -165,8 +174,20 @@ export function reduce(
       };
     }
 
-    case "agent_end":
+    case "turn_end":
+      // turn 是 run 内的单步；回溯入口按 run 粒度呈现（见 agent_end），此处不打边界。
+      return state;
+
+    case "rollback":
+      // 后端已把 HEAD 移回该 turn。视图不在 reducer 里猜测截断（ChatMessageView 与
+      // 后端 Message[] 非一一对应：tool_result 会并进卡片）。改由 hook 监听到该事件后
+      // 重新 getHistory() 重建——历史是权威。这里仅结束流式态。
       return { ...state, isStreaming: false };
+
+    case "agent_end":
+      // 一个 run（一次用户输入 → 多个 turn）结束：按 run 粒度重标回溯入口
+      // （只在每个 run 最后一条 assistant 消息上，回溯目标 = 该 run 第一个 turn）。
+      return { ...state, messages: markRunBoundaries(state.messages), isStreaming: false };
 
     default:
       return state;
@@ -210,9 +231,41 @@ export function messagesToViews(
         });
       }
     }
-    views.push({ id: m.id, role: m.role, text, tools });
+    views.push({ id: m.id, role: m.role, text, tools, turnId: m.turnId });
   }
-  return views;
+  return markRunBoundaries(views);
+}
+
+/** turnId 格式 `${sessionId}-${runIndex}-${turnIndex}`，取出 runIndex（解析失败返回 undefined）。 */
+export function runIndexOf(turnId: string | undefined): number | undefined {
+  if (!turnId) return undefined;
+  const parts = turnId.split("-");
+  if (parts.length < 2) return undefined;
+  const run = Number(parts[parts.length - 2]);
+  return Number.isFinite(run) ? run : undefined;
+}
+
+/**
+ * 按 run 粒度标记回溯入口：每个 run（同 runIndex）的最后一条 assistant 消息置
+ * isRunBoundary，回溯目标 = 该 run 第一个 turn。纯函数，历史重建与实时事件共用。
+ */
+export function markRunBoundaries(views: ChatMessageView[]): ChatMessageView[] {
+  const firstTurnByRun = new Map<number, string>();
+  const lastAssistantIdxByRun = new Map<number, number>();
+  views.forEach((v, i) => {
+    const run = runIndexOf(v.turnId);
+    if (run === undefined) return;
+    if (!firstTurnByRun.has(run)) firstTurnByRun.set(run, v.turnId!);
+    if (v.role === "assistant") lastAssistantIdxByRun.set(run, i);
+  });
+  if (lastAssistantIdxByRun.size === 0) return views;
+  const boundaryIdx = new Map<number, number>(); // idx -> run
+  for (const [run, idx] of lastAssistantIdxByRun) boundaryIdx.set(idx, run);
+  return views.map((v, i) => {
+    if (!boundaryIdx.has(i)) return v.isRunBoundary ? { ...v, isRunBoundary: false } : v;
+    const run = boundaryIdx.get(i)!;
+    return { ...v, isRunBoundary: true, rollbackTurnId: firstTurnByRun.get(run) };
+  });
 }
 
 export interface UseChatResult {
@@ -220,35 +273,64 @@ export interface UseChatResult {
   isStreaming: boolean;
   connection: ConnectionState;
   send: (text: string) => Promise<void>;
+  /** 中断当前 run（Stop 按钮）。client 不支持则为 no-op。 */
+  stop: () => Promise<void>;
+  /** 回溯到某 turn（⟲ 从这里重新开始）。client 不支持则为 no-op。 */
+  rollback: (turnId: string) => Promise<void>;
+  /** client 是否支持 stop（据此显隐 Stop 按钮）。 */
+  canStop: boolean;
+  /** client 是否支持 rollback（据此显隐回溯入口）。 */
+  canRollback: boolean;
+  /** 当前挂起的审批提问(AskUserQuestion);null 表示无。 */
+  pendingQuestion: AskQuestion | null;
+  /** 回传审批答案，解阻塞对应工具并清空卡片。 */
+  answer: (questionId: string, answers: string[]) => Promise<void>;
 }
 
 export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } = {}): UseChatResult {
   const { renderTool } = opts;
   const [state, setState] = useState<ChatState>(initialState);
   const [connection, setConnection] = useState<ConnectionState>("open");
-  const stateRef = useRef(state);
-  stateRef.current = state;
+  // 当前挂起的审批提问(AskUserQuestion);null 表示无。答复后清空。
+  const [pendingQuestion, setPendingQuestion] = useState<AskQuestion | null>(null);
+
+  /**
+   * 从后端权威历史重建视图。
+   * - mode "merge"（挂载时）：保留尚未落历史的流式消息，避免历史晚到清掉在途消息。
+   * - mode "replace"（rollback 后）：历史即权威,被后端移除的消息必须消失,不保留任何在途。
+   */
+  const mergeHistory = useCallback(
+    (aliveRef: { alive: boolean }, mode: "merge" | "replace" = "merge") => {
+      void client.getHistory().then((history) => {
+        if (!aliveRef.alive) return;
+        setState((s) => {
+          const hist = messagesToViews(history, renderTool);
+          if (mode === "replace") return { ...s, messages: hist };
+          const histIds = new Set(hist.map((m) => m.id));
+          const streamed = s.messages.filter((m) => !histIds.has(m.id));
+          return { ...s, messages: [...hist, ...streamed] };
+        });
+      });
+    },
+    [client, renderTool],
+  );
 
   useEffect(() => {
-    let alive = true;
-    void client.getHistory().then((history) => {
-      if (!alive) return;
-      // 合并而非覆盖:历史可能晚于首批事件到达,不能清掉已归并的流式消息。
-      setState((s) => {
-        const hist = messagesToViews(history, renderTool);
-        const histIds = new Set(hist.map((m) => m.id));
-        const streamed = s.messages.filter((m) => !histIds.has(m.id));
-        return { ...s, messages: [...hist, ...streamed] };
-      });
-    });
+    const aliveRef = { alive: true };
+    mergeHistory(aliveRef);
     const offEvent = client.onEvent((e) => {
       setState((prev) => reduce(prev, e, renderTool));
+      // rollback：后端已移 HEAD，重新拉取权威历史并整体替换（被移除的消息随之消失）。
+      if (e.type === "rollback") mergeHistory(aliveRef, "replace");
     });
     const offState = client.onState?.((s) => setConnection(s));
+    const offAsk = client.onAsk?.((q) => setPendingQuestion(q));
     return () => {
-      alive = false;
+      aliveRef.alive = false;
       offEvent();
       offState?.();
+      offAsk?.();
+      setPendingQuestion(null); // 切会话/断开：清掉挂起提问
     };
     // client 变化即整体重建订阅(切会话)。renderTool 稳定性由调用方负责。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -263,5 +345,35 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     [client],
   );
 
-  return { messages: state.messages, isStreaming: state.isStreaming, connection, send };
+  const stop = useCallback(async () => {
+    await client.cancel?.();
+  }, [client]);
+
+  const rollback = useCallback(
+    async (turnId: string) => {
+      await client.rollback?.(turnId);
+    },
+    [client],
+  );
+
+  const answer = useCallback(
+    async (questionId: string, answers: string[]) => {
+      setPendingQuestion((cur) => (cur?.questionId === questionId ? null : cur));
+      await client.answer?.(questionId, answers);
+    },
+    [client],
+  );
+
+  return {
+    messages: state.messages,
+    isStreaming: state.isStreaming,
+    connection,
+    send,
+    stop,
+    rollback,
+    canStop: typeof client.cancel === "function",
+    canRollback: typeof client.rollback === "function",
+    pendingQuestion,
+    answer,
+  };
 }
