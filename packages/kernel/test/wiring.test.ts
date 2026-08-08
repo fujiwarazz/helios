@@ -25,7 +25,7 @@ beforeEach(async () => {
 });
 
 describe("CompactStrategyPort 接入 turn 循环", () => {
-  it("shouldCompact 命中 → 截断历史 + 摘要注入 system + emit compact 事件", async () => {
+  it("shouldCompact 命中 → 生成 summary 节点、被压缩旧节点移出当前路径 + emit compact 事件", async () => {
     const manifest: Manifest = {
       plugins: [
         { port: "FileSystemPort", package: "@helios/fs-node" },
@@ -49,13 +49,12 @@ describe("CompactStrategyPort 接入 turn 循环", () => {
     expect(events.some((e) => e.type === "compact_start")).toBe(true);
     expect(events.some((e) => e.type === "compact_end")).toBe(true);
 
-    // 被覆盖的旧消息（含 FIRST）应从历史移除
+    // 被压缩的旧节点（含 FIRST）移出当前路径（pathToHead 到 summary 边界即止），但树里未删。
     const history = session.getHistory();
     expect(history.some((m) => textOf(m).includes("FIRST"))).toBe(false);
 
-    // run2 的 assistant 回显了 system → 应包含注入的摘要
-    const assistant = history.find((m) => m.role === "assistant");
-    expect(assistant && textOf(assistant)).toContain("COMPACTED_SUMMARY");
+    // 树模型下摘要以 summary 节点形式进入当前路径（不再注入 system）。
+    expect(history.some((m) => textOf(m).includes("COMPACTED_SUMMARY"))).toBe(true);
   });
 });
 

@@ -34,6 +34,11 @@ export interface Message {
   content: string | ContentBlock[];
   /** 归属的 turn；用户首条 system/user 消息可无 */
   turnId?: string;
+  /**
+   * 消息树中的父节点 id；null = 根。可选以兼容老数据/直接构造的 Message
+   * （Session 内部会在 appendNode 时按当前 HEAD 补齐）。
+   */
+  parentId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
