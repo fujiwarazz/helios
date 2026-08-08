@@ -246,7 +246,7 @@ describe("UserPromptSubmit —— 循环触发点", () => {
 });
 
 describe("SessionStart —— 懒触发 + 冻结注入", () => {
-  it("仅首次 sendMessage() 触发一次；resumed 反映 restore() 结果", async () => {
+  it("仅首次 sendMessage() 触发一次；source 反映 restore() 结果", async () => {
     const { session } = await bootHookCaptureSession();
 
     await session.sendMessage("第一条");
@@ -254,10 +254,10 @@ describe("SessionStart —— 懒触发 + 冻结注入", () => {
 
     const starts = hookCalls.filter((c) => c.event === "SessionStart");
     expect(starts).toHaveLength(1);
-    expect(starts[0]!.payload).toMatchObject({ sessionId: session.id, resumed: false });
+    expect(starts[0]!.payload).toMatchObject({ sessionId: session.id, source: "startup" });
   });
 
-  it("resumeSession 恢复历史会话时 resumed === true", async () => {
+  it("resumeSession 恢复历史会话时 source === 'resume'", async () => {
     const manifest: Manifest = {
       plugins: [
         { port: "FileSystemPort", package: "@helios/fs-node" },
@@ -277,7 +277,7 @@ describe("SessionStart —— 懒触发 + 冻结注入", () => {
 
     const starts = hookCalls.filter((c) => c.event === "SessionStart");
     expect(starts).toHaveLength(1);
-    expect(starts[0]!.payload).toMatchObject({ resumed: true });
+    expect(starts[0]!.payload).toMatchObject({ source: "resume" });
   });
 
   it("additionalContext 折入冻结的 systemPrefix，仅计算一次", async () => {
@@ -301,6 +301,35 @@ describe("SessionEnd —— dispose() 通知", () => {
     const ends = hookCalls.filter((c) => c.event === "SessionEnd");
     expect(ends).toHaveLength(1);
     expect(ends[0]!.payload).toMatchObject({ sessionId: session.id, workDir });
+  });
+});
+
+describe("sessionId 贯穿所有 Hook 事件（对齐 valos HookBaseStdin）", () => {
+  it("UserPromptSubmit/SessionStart/PreToolUse/PostToolUse/Stop/SessionEnd payload 均带正确 sessionId", async () => {
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("hookCaptureCapability.ts") },
+        { port: "CapabilityProvider", package: fixture("mockCapability.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmWithTool.ts") },
+      ],
+    };
+    const { logger } = capturingLogger();
+    const kernel = new Kernel({ workDir, manifest, logger });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    await session.sendMessage("go"); // 一轮 mock__echo 工具调用 + 一轮纯文本结束（触发 Stop）
+    await session.dispose();
+
+    const events = ["UserPromptSubmit", "SessionStart", "PreToolUse", "PostToolUse", "Stop", "SessionEnd"];
+    for (const event of events) {
+      const matched = hookCalls.filter((c) => c.event === event);
+      expect(matched.length, `事件 ${event} 应至少触发一次`).toBeGreaterThan(0);
+      for (const call of matched) {
+        expect(call.payload, `${event} payload 应带 sessionId`).toMatchObject({ sessionId: session.id });
+      }
+    }
   });
 });
 

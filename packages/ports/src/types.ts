@@ -204,8 +204,8 @@ export type HookEvent =
 export interface SessionStartPayload {
   sessionId: string;
   workDir: string;
-  /** 是否为 resume 的历史会话（session.restore() 命中） */
-  resumed: boolean;
+  /** 对齐 valos：'startup' = 全新会话，'resume' = session.restore() 命中历史会话 */
+  source: "startup" | "resume";
 }
 export interface SessionStartDecision {
   /** 追加注入 system 的上下文；会话级，只在首次生效并随 systemPrefix 一起冻结 */
@@ -213,6 +213,7 @@ export interface SessionStartDecision {
 }
 
 export interface UserPromptSubmitPayload {
+  sessionId: string;
   text: string;
 }
 export interface UserPromptSubmitDecision {
@@ -225,6 +226,7 @@ export interface UserPromptSubmitDecision {
 }
 
 export interface PreToolUsePayload {
+  sessionId: string;
   toolName: string;
   input: unknown;
 }
@@ -236,6 +238,7 @@ export interface PreToolUseDecision {
 }
 
 export interface PostToolUsePayload {
+  sessionId: string;
   toolName: string;
   input: unknown;
   output: unknown;
@@ -249,6 +252,7 @@ export interface PostToolUseDecision {
 }
 
 export interface StopPayload {
+  sessionId: string;
   turnCount: number;
 }
 export interface StopDecision {

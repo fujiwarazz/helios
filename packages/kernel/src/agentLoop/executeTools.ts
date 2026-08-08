@@ -12,6 +12,8 @@ export interface ExecuteToolsParams {
   parseErrorIds?: Set<string>;
   toolRegistry: ToolRegistry;
   hooks: HookRunner;
+  /** 贯穿所有 hook payload 的公共字段，对齐 valos HookBaseStdin。 */
+  sessionId: string;
   toolCtx: ToolContext;
   events: AgentEventEmitter;
 }
@@ -32,13 +34,14 @@ interface OneToolCallResult {
  * 结果始终按 toolUseBlocks 原始顺序组装，与模型给出的顺序一致（并行模式下完成顺序可能不同）。
  */
 export async function executeTools(params: ExecuteToolsParams): Promise<ExecuteToolsResult> {
-  const { turnId, toolUseBlocks, parseErrorIds = new Set(), toolRegistry, hooks, toolCtx, events } = params;
+  const { turnId, toolUseBlocks, parseErrorIds = new Set(), toolRegistry, hooks, sessionId, toolCtx, events } = params;
 
   const allParallel =
     toolUseBlocks.length > 0 &&
     toolUseBlocks.every((b) => toolRegistry.get(b.name)?.executionMode === "parallel");
 
-  const one = (block: ToolUseBlock) => runOneToolCall(block, parseErrorIds, toolRegistry, hooks, toolCtx, events);
+  const one = (block: ToolUseBlock) =>
+    runOneToolCall(block, parseErrorIds, toolRegistry, hooks, sessionId, toolCtx, events);
   const results: OneToolCallResult[] = allParallel
     ? await Promise.all(toolUseBlocks.map(one))
     : await sequentialMap(toolUseBlocks, one);
@@ -67,6 +70,7 @@ async function runOneToolCall(
   parseErrorIds: Set<string>,
   toolRegistry: ToolRegistry,
   hooks: HookRunner,
+  sessionId: string,
   toolCtx: ToolContext,
   events: AgentEventEmitter,
 ): Promise<OneToolCallResult> {
@@ -87,7 +91,7 @@ async function runOneToolCall(
   }
 
   // PreToolUse
-  const pre = await hooks.runPreToolUse({ toolName: block.name, input });
+  const pre = await hooks.runPreToolUse({ sessionId, toolName: block.name, input });
   if (pre.decision === "deny") {
     output = `工具调用被 Hook 拒绝：${pre.reason ?? ""}`.trim();
     isError = true;
@@ -124,7 +128,7 @@ async function runOneToolCall(
         }
       }
       // PostToolUse
-      const post = await hooks.runPostToolUse({ toolName: block.name, input, output, isError });
+      const post = await hooks.runPostToolUse({ sessionId, toolName: block.name, input, output, isError });
       if (post.output !== undefined) output = post.output;
       if (post.block) isError = true;
     }

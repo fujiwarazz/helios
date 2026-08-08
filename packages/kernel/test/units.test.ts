@@ -130,13 +130,13 @@ describe("HookRunner —— SessionStart 合并", () => {
       { event: "SessionStart", handler: () => undefined },
       { event: "SessionStart", handler: () => ({ additionalContext: "B" }) },
     ]);
-    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", resumed: false });
+    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", source: "startup" });
     expect(d.additionalContext).toBe("A\nB");
   });
 
   it("无 handler 时返回 undefined", async () => {
     const r = new HookRunner();
-    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", resumed: false });
+    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", source: "startup" });
     expect(d.additionalContext).toBeUndefined();
   });
 });

@@ -43,6 +43,24 @@ const provider: CapabilityProvider = {
           calls.push({ event: "SessionEnd", payload: p });
         },
       },
+      {
+        event: "PreToolUse",
+        handler: (p) => {
+          calls.push({ event: "PreToolUse", payload: p });
+        },
+      },
+      {
+        event: "PostToolUse",
+        handler: (p) => {
+          calls.push({ event: "PostToolUse", payload: p });
+        },
+      },
+      {
+        event: "Stop",
+        handler: (p) => {
+          calls.push({ event: "Stop", payload: p });
+        },
+      },
     ];
   },
 };

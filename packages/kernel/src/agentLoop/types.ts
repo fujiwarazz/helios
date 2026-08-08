@@ -37,6 +37,8 @@ export interface RunLoopDeps {
   provider: LLMProvider;
   toolRegistry: ToolRegistry;
   hooks: HookRunner;
+  /** 贯穿所有 hook payload 的公共字段，对齐 valos HookBaseStdin。 */
+  sessionId: string;
   workDir: string;
   logger: Logger;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
