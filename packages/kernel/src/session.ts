@@ -231,26 +231,30 @@ export class Session {
     }
 
     const { turnIds, runError, reachedMaxTurns } = await runTurnLoop({
+      deps: {
+        provider: ports.llm.get(this.opts.llmOptions.provider),
+        toolRegistry: this.opts.tools,
+        hooks,
+        ports,
+        workDir: this.opts.workDir,
+        logger,
+        askQuestion: this.opts.askQuestion,
+        signal: abort.signal,
+        events: { emit: (e) => this.emit(e) },
+      },
+      tree: {
+        appendNode: (msg) => this.appendNode(msg),
+        currentHeadId: () => this.headId,
+        pathToHead: () => this.pathToHead(),
+        snapshotCheckpoint: (turnId) => ports.checkpoint.snapshot(turnId),
+        persistTurn: (record) => this.persistTurn(record),
+      },
       turnIdPrefix: `${this.id}-${runIndex}`,
       runIndex,
       maxTurns: this.maxTurns,
       system,
       llmOptions: this.opts.llmOptions,
-      provider: ports.llm.get(this.opts.llmOptions.provider),
-      toolRegistry: this.opts.tools,
-      hooks,
-      ports,
-      workDir: this.opts.workDir,
-      logger,
-      askQuestion: this.opts.askQuestion,
-      signal: abort.signal,
-      emit: (e) => this.emit(e),
       pendingLeadMessages: [userMsg],
-      appendNode: (msg) => this.appendNode(msg),
-      currentHeadId: () => this.headId,
-      pathToHead: () => this.pathToHead(),
-      snapshotCheckpoint: (turnId) => ports.checkpoint.snapshot(turnId),
-      persistTurn: (record) => this.persistTurn(record),
     });
 
     // Bug 5：因达到 turn 上限（而非自然结束）退出 → 记录并在 agent_end 标注，避免静默截断。

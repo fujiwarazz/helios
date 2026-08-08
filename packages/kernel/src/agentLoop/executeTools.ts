@@ -2,7 +2,7 @@ import type { ContentBlock, ToolContext, Message } from "@helios/ports";
 import { uid } from "../ids";
 import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
-import type { AgentEvent, ToolResultRecord } from "../events";
+import type { AgentEventEmitter, ToolResultRecord } from "../events";
 import type { ToolUseBlock } from "./types";
 
 export interface ExecuteToolsParams {
@@ -13,7 +13,7 @@ export interface ExecuteToolsParams {
   toolRegistry: ToolRegistry;
   hooks: HookRunner;
   toolCtx: ToolContext;
-  emit: (event: AgentEvent) => void;
+  events: AgentEventEmitter;
 }
 
 export interface ExecuteToolsResult {
@@ -32,13 +32,13 @@ interface OneToolCallResult {
  * 结果始终按 toolUseBlocks 原始顺序组装，与模型给出的顺序一致（并行模式下完成顺序可能不同）。
  */
 export async function executeTools(params: ExecuteToolsParams): Promise<ExecuteToolsResult> {
-  const { turnId, toolUseBlocks, parseErrorIds = new Set(), toolRegistry, hooks, toolCtx, emit } = params;
+  const { turnId, toolUseBlocks, parseErrorIds = new Set(), toolRegistry, hooks, toolCtx, events } = params;
 
   const allParallel =
     toolUseBlocks.length > 0 &&
     toolUseBlocks.every((b) => toolRegistry.get(b.name)?.executionMode === "parallel");
 
-  const one = (block: ToolUseBlock) => runOneToolCall(block, parseErrorIds, toolRegistry, hooks, toolCtx, emit);
+  const one = (block: ToolUseBlock) => runOneToolCall(block, parseErrorIds, toolRegistry, hooks, toolCtx, events);
   const results: OneToolCallResult[] = allParallel
     ? await Promise.all(toolUseBlocks.map(one))
     : await sequentialMap(toolUseBlocks, one);
@@ -68,7 +68,7 @@ async function runOneToolCall(
   toolRegistry: ToolRegistry,
   hooks: HookRunner,
   toolCtx: ToolContext,
-  emit: (event: AgentEvent) => void,
+  events: AgentEventEmitter,
 ): Promise<OneToolCallResult> {
   let input = block.input;
   let output: unknown;
@@ -78,8 +78,8 @@ async function runOneToolCall(
   if (parseErrorIds.has(block.id)) {
     output = "工具参数 JSON 解析失败或输出被截断，请检查参数格式后重试。";
     isError = true;
-    emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input });
-    emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
+    events.emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input });
+    events.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
     return {
       resultBlock: { type: "tool_result", toolUseId: block.id, output, isError },
       record: { toolUseId: block.id, name: block.name, output, isError },
@@ -109,7 +109,7 @@ async function runOneToolCall(
     if (!isError) {
       if (pre.input !== undefined) input = pre.input;
       const tool = toolRegistry.get(block.name);
-      emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input });
+      events.emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input });
       if (!tool) {
         output = `未找到工具：${block.name}`;
         isError = true;
@@ -131,7 +131,7 @@ async function runOneToolCall(
   }
 
   // Bug 6：end 与 start 成对无条件 emit（emit 很便宜），避免中途订阅收到不成对事件。
-  emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
+  events.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
   return {
     resultBlock: { type: "tool_result", toolUseId: block.id, output, isError },
     record: { toolUseId: block.id, name: block.name, output, isError },

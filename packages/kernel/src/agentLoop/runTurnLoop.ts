@@ -1,36 +1,22 @@
-import type { Message, PortRegistry, Logger, LLMOptions, LLMProvider, Ref, AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
-import type { ToolRegistry } from "../toolRegistry";
-import type { HookRunner } from "../hookRunner";
+import type { Message, LLMOptions } from "@helios/ports";
 import { uid } from "../ids";
-import type { AgentEvent } from "../events";
 import { streamAssistant } from "./streamAssistant";
 import { executeTools } from "./executeTools";
-import type { TurnRecord } from "./types";
+import type { RunLoopDeps, SessionTreeCallbacks } from "./types";
 
 export interface RunTurnLoopParams {
+  /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
+  deps: RunLoopDeps;
+  /** Session 消息树的操作面：回调驱动树变更，runTurnLoop 不持有任何树内部状态。 */
+  tree: SessionTreeCallbacks;
   /** turnId 前缀，通常是 `${session.id}-${runIndex}` */
   turnIdPrefix: string;
   runIndex: number;
   maxTurns: number;
   system: string;
   llmOptions: LLMOptions;
-  provider: LLMProvider;
-  toolRegistry: ToolRegistry;
-  hooks: HookRunner;
-  ports: PortRegistry;
-  workDir: string;
-  logger: Logger;
-  askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
-  signal: AbortSignal;
-  emit: (event: AgentEvent) => void;
   /** 本 run 待发出的首轮 lead messages（通常是刚 append 的 userMsg）。 */
   pendingLeadMessages: Message[];
-  // 树操作以回调形式注入，Session 继续独占树状态。
-  appendNode(msg: Message): void;
-  currentHeadId(): string | null;
-  pathToHead(): Message[];
-  snapshotCheckpoint(turnId: string): Promise<Ref>;
-  persistTurn(record: TurnRecord): Promise<void>;
   /**
    * 扩展点（当前不实现队列本身）：每轮 turn 结束后调用一次尝试 drain，若返回非空消息，
    * 会作为下一轮的 lead messages 前置注入。默认不传 = 无中途插话，行为与改造前一致。
@@ -49,31 +35,11 @@ export interface RunTurnLoopResult {
 /**
  * turn 循环骨架（内层循环）：streamAssistant → 有 tool_use 就 executeTools 继续下一轮，
  * 否则走 Stop hook 判断是否强制继续，都不满足则结束本 run。不涉及消息树/持久化的具体实现，
- * 只通过回调驱动 —— 调用方（Session）继续独占树状态。
+ * 只通过 `tree` 回调驱动 —— 调用方（Session）继续独占树状态。
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
-  const {
-    turnIdPrefix,
-    runIndex,
-    maxTurns,
-    system,
-    llmOptions,
-    provider,
-    toolRegistry,
-    hooks,
-    ports,
-    workDir,
-    logger,
-    askQuestion,
-    signal,
-    emit,
-    appendNode,
-    currentHeadId,
-    pathToHead,
-    snapshotCheckpoint,
-    persistTurn,
-    getSteeringMessages,
-  } = params;
+  const { deps, tree, turnIdPrefix, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
+  const { provider, toolRegistry, hooks, ports, workDir, logger, askQuestion, signal, events } = deps;
 
   const turnIds: string[] = [];
   let turnIndex = 0;
@@ -92,22 +58,22 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const turnId = `${turnIdPrefix}-${turnIndex}`;
     turnIds.push(turnId);
     // turn 前锚点 = 此刻 HEAD（本 turn assistant 之前的节点），供回溯定位。
-    const anchorNodeId = currentHeadId();
-    const checkpointRef = await snapshotCheckpoint(turnId);
-    emit({ type: "turn_start", turnId });
+    const anchorNodeId = tree.currentHeadId();
+    const checkpointRef = await tree.snapshotCheckpoint(turnId);
+    events.emit({ type: "turn_start", turnId });
 
     let streamed: Awaited<ReturnType<typeof streamAssistant>>;
     try {
       streamed = await streamAssistant({
         provider,
-        messages: pathToHead(),
+        messages: tree.pathToHead(),
         tools: toolRegistry.list(),
         llmOptions,
         system,
         signal,
         turnId,
         logger,
-        emit,
+        events,
       });
     } catch (err) {
       // 中断导致的流异常（AbortError）视为正常停止，不向上抛
@@ -124,14 +90,14 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const assistantHasContent =
       Array.isArray(assistantMsg.content) && assistantMsg.content.some((b) => b.type !== "thinking");
     if (assistantHasContent) {
-      appendNode(assistantMsg);
+      tree.appendNode(assistantMsg);
       turnMessages.push(assistantMsg);
     }
 
     // Bug 3：LLM 流中途报错 → 优雅结束本 run（保证 agent_end 一定 emit、路径一致），不 throw。
     if (streamError) {
-      await persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
-      emit({ type: "turn_end", turnId, toolResults: [] });
+      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      events.emit({ type: "turn_end", turnId, toolResults: [] });
       runError = streamError;
       break;
     }
@@ -145,12 +111,12 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         toolRegistry,
         hooks,
         toolCtx,
-        emit,
+        events,
       });
-      appendNode(toolResultMsg);
+      tree.appendNode(toolResultMsg);
       turnMessages.push(toolResultMsg);
-      await persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
-      emit({ type: "turn_end", turnId, toolResults: records });
+      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      events.emit({ type: "turn_end", turnId, toolResults: records });
       turnIndex++;
       continue; // 下一个 turn，把工具结果喂回 LLM
     }
@@ -159,17 +125,17 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const stopDecision = await hooks.runStop({ turnCount: turnIndex + 1 });
     if (stopDecision.block && stopDecision.message) {
       const injected: Message = { id: uid("msg"), role: "user", content: stopDecision.message, turnId };
-      appendNode(injected);
+      tree.appendNode(injected);
       turnMessages.push(injected);
       pendingLeadMessages = [injected];
-      await persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
-      emit({ type: "turn_end", turnId, toolResults: [] });
+      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      events.emit({ type: "turn_end", turnId, toolResults: [] });
       turnIndex++;
       continue;
     }
 
-    await persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
-    emit({ type: "turn_end", turnId, toolResults: [] });
+    await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+    events.emit({ type: "turn_end", turnId, toolResults: [] });
     break;
   }
 
