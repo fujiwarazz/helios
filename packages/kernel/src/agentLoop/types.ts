@@ -2,7 +2,6 @@ import type {
   ContentBlock,
   Message,
   Ref,
-  PortRegistry,
   Logger,
   LLMProvider,
   AskQuestionRequest,
@@ -38,7 +37,6 @@ export interface RunLoopDeps {
   provider: LLMProvider;
   toolRegistry: ToolRegistry;
   hooks: HookRunner;
-  ports: PortRegistry;
   workDir: string;
   logger: Logger;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;

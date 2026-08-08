@@ -86,6 +86,12 @@ export class Session {
   private currentAbort: AbortController | null = null;
   private createdAt = Date.now();
   private title = "";
+  /** SessionStart 是否已懒触发（仅首次 sendMessage() 触发一次，与 systemPrefix 冻结时机一致）。 */
+  private sessionStarted = false;
+  /** restore() 是否命中历史记录；供 SessionStart payload.resumed 使用。 */
+  private wasResumed = false;
+  /** SessionStart handler 返回的 additionalContext，随 systemPrefix 一起冻结注入。 */
+  private sessionStartContext: string | undefined;
 
   constructor(private readonly opts: SessionOptions) {
     this.id = opts.id;
@@ -104,6 +110,14 @@ export class Session {
   /** 中断当前 run：触发 signal，让正在执行的工具（Bash/WebFetch）尽快停止。 */
   cancel(): void {
     this.currentAbort?.abort();
+  }
+
+  /**
+   * 标记本次运行时生命周期结束（如宿主侧连接关闭），触发 SessionEnd 通知型 hook。
+   * 会话数据仍留在磁盘可 resume，本方法不删除/清理任何状态，纯粹是生命周期通知点。
+   */
+  async dispose(): Promise<void> {
+    await this.opts.hooks.runSessionEnd({ sessionId: this.id, workDir: this.opts.workDir });
   }
 
   // -------------------------------------------------------------------------
@@ -188,6 +202,34 @@ export class Session {
   /** 发送一条用户消息，驱动一个完整 run（agent_start → 多 turn → agent_end）。 */
   async sendMessage(text: string): Promise<Message[]> {
     const { ports, hooks, logger } = this.opts;
+
+    // UserPromptSubmit：提交后、进入 LLM 前。可 block（不进入循环）/ 改写文本 / 追加上下文。
+    const submitDecision = await hooks.runUserPromptSubmit({ text });
+    if (submitDecision.block) {
+      const rejectRunId = uid("run");
+      this.emit({ type: "agent_start", runId: rejectRunId });
+      const rejected: Message = {
+        id: uid("msg"),
+        role: "system",
+        content: submitDecision.reason ?? "用户输入被 Hook 拒绝",
+      };
+      this.appendNode(rejected);
+      this.emit({ type: "agent_end", runId: rejectRunId, turnIds: [], newMessages: [rejected], error: submitDecision.reason });
+      return [rejected];
+    }
+    text = submitDecision.text ?? text;
+
+    // SessionStart：懒触发，仅首次 sendMessage() 调用一次（对齐 valos session.start() 内触发时机）。
+    if (!this.sessionStarted) {
+      this.sessionStarted = true;
+      const startDecision = await hooks.runSessionStart({
+        sessionId: this.id,
+        workDir: this.opts.workDir,
+        resumed: this.wasResumed,
+      });
+      this.sessionStartContext = startDecision.additionalContext;
+    }
+
     const runId = uid("run");
     const runIndex = this.runIndex++;
     if (!this.title) this.title = text.slice(0, 60);
@@ -200,11 +242,12 @@ export class Session {
     // run 开始前：对当前路径按策略压缩（生成 summary 节点 + 压缩记录；不改物理树、不移 HEAD）。
     const pendingCompaction = await this.maybeCompact();
 
-    // 缓存纪律一：system 前缀（base + memory 召回）每会话只算一次并冻结，之后每 run 复用。
+    // 缓存纪律一：system 前缀（base + memory 召回 + SessionStart 注入）每会话只算一次并冻结，之后每 run 复用。
     if (this.systemPrefix === null) {
       const recalled = await ports.memory.recall(text);
       const parts = [this.opts.system];
       if (recalled) parts.push(`<memory>\n${recalled}\n</memory>`);
+      if (this.sessionStartContext) parts.push(`<hook-context>\n${this.sessionStartContext}\n</hook-context>`);
       this.systemPrefix = parts.join("\n\n");
     }
     const system = this.systemPrefix;
@@ -212,7 +255,10 @@ export class Session {
     // 本 run 新增消息的起点：压缩后有效路径长度（compaction-safe，等价旧线性 history.length 切片）。
     const before = this.pathToHead().length;
 
-    const userMsg: Message = { id: uid("msg"), role: "user", content: text };
+    const userContent = submitDecision.additionalContext
+      ? `${text}\n\n<hook-context>\n${submitDecision.additionalContext}\n</hook-context>`
+      : text;
+    const userMsg: Message = { id: uid("msg"), role: "user", content: userContent };
     this.appendNode(userMsg);
     // 广播用户消息事件：让订阅端(UI)在 run 进行中即可显示用户气泡，无需等 run 结束 getHistory。
     // 用户文本不流式，一次性 start+delta+end。
@@ -235,7 +281,6 @@ export class Session {
         provider: ports.llm.get(this.opts.llmOptions.provider),
         toolRegistry: this.opts.tools,
         hooks,
-        ports,
         workDir: this.opts.workDir,
         logger,
         askQuestion: this.opts.askQuestion,
@@ -469,7 +514,8 @@ export class Session {
     this.opts.logger.info(
       `会话 ${this.id} 已 resume：turns=${this.turnLog.length} 历史消息=${this.nodes.size} 压缩记录=${this.compactions.length} 下一 run=${this.runIndex}`,
     );
-    return this.turnLog.length > 0;
+    this.wasResumed = this.turnLog.length > 0;
+    return this.wasResumed;
   }
 
   /**

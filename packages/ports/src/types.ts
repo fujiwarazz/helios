@@ -76,19 +76,18 @@ export interface AskQuestionResponse {
   answers: string[];
 }
 
-/** Port 注册表里的字段名，用于工具按需声明依赖（接口隔离）。 */
-export type PortName = keyof PortRegistry;
-
-/** 工具执行时可用的运行时上下文（区别于插件装配期的 KernelContext） */
+/**
+ * 工具执行时可用的运行时上下文（区别于插件装配期的 KernelContext）。
+ * 只放"所有工具天然都需要"的环境级能力（工作目录/日志/中断信号/人工提问）——
+ * 业务能力（文件系统、多智能体等具体 Port）不放在这里，而是由注册方在构造工具时
+ * 按需以闭包形式注入给该工具自己（接口隔离：拿不到的能力不会出现在共享上下文里，
+ * 不是"声明了就信任"的运行时校验，是结构上摸不到）。参考 `capability-fs` 的
+ * `create(ctx) → new FsCapability(ctx.ports.fileSystem)` 与 `builtin/tools.ts` 的
+ * `createReadTool(fileSystem)` 工厂函数模式。
+ */
 export interface ToolContext {
   workDir: string;
   logger: Logger;
-  /**
-   * 按工具 `requiredPorts` 声明裁剪后的 Port 集合（接口隔离）：未声明的 Port 类型上仍是
-   * `PortRegistry` 的形状，但运行时访问会抛错——工具不该拿到自己没申报要用的能力。
-   * 未声明 `requiredPorts`（如 CapabilityProvider 自带的工具）视为兼容旧行为，给全量。
-   */
-  ports: PortRegistry;
   signal?: AbortSignal;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
 }
@@ -103,12 +102,6 @@ export interface Tool {
    * tool_use 中有任一工具非 parallel，整批退化为顺序执行（详见 executeTools）。
    */
   executionMode?: "sequential" | "parallel";
-  /**
-   * 声明本工具运行时实际依赖哪些 Port；kernel 按此裁剪 `ctx.ports`，访问未声明的 Port 会
-   * 抛错而非静默拿到（接口隔离：不给工具超出自己声明范围的能力）。
-   * 缺省（undefined）= 不裁剪，给全量 `PortRegistry`（兼容未声明的旧工具/第三方工具）。
-   */
-  requiredPorts?: readonly PortName[];
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>;
 }
 
@@ -196,10 +189,40 @@ export interface ConversationState {
 }
 
 // ---------------------------------------------------------------------------
-// Hook 绑定（P0 仅 3 个事件）
+// Hook 绑定（覆盖完整 agent cycle：SessionStart → UserPromptSubmit → PreToolUse
+// → PostToolUse → Stop → SessionEnd）
 // ---------------------------------------------------------------------------
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "Stop";
+export type HookEvent =
+  | "SessionStart"
+  | "UserPromptSubmit"
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Stop"
+  | "SessionEnd";
+
+export interface SessionStartPayload {
+  sessionId: string;
+  workDir: string;
+  /** 是否为 resume 的历史会话（session.restore() 命中） */
+  resumed: boolean;
+}
+export interface SessionStartDecision {
+  /** 追加注入 system 的上下文；会话级，只在首次生效并随 systemPrefix 一起冻结 */
+  additionalContext?: string;
+}
+
+export interface UserPromptSubmitPayload {
+  text: string;
+}
+export interface UserPromptSubmitDecision {
+  block?: boolean;
+  reason?: string;
+  /** 允许时可改写用户文本（覆盖，最后一个非 undefined 生效） */
+  text?: string;
+  /** 追加注入 system 的上下文（不改写原文本；多个 handler 结果按 \n 拼接） */
+  additionalContext?: string;
+}
 
 export interface PreToolUsePayload {
   toolName: string;
@@ -234,7 +257,25 @@ export interface StopDecision {
   message?: string;
 }
 
+export interface SessionEndPayload {
+  sessionId: string;
+  workDir: string;
+}
+// SessionEnd 是纯通知型事件（清理/审计用途），无 Decision，handler 无返回值语义
+
 export type HookBinding =
+  | {
+      event: "SessionStart";
+      handler: (
+        p: SessionStartPayload,
+      ) => SessionStartDecision | void | Promise<SessionStartDecision | void>;
+    }
+  | {
+      event: "UserPromptSubmit";
+      handler: (
+        p: UserPromptSubmitPayload,
+      ) => UserPromptSubmitDecision | void | Promise<UserPromptSubmitDecision | void>;
+    }
   | {
       event: "PreToolUse";
       handler: (
@@ -252,6 +293,10 @@ export type HookBinding =
       handler: (
         p: StopPayload,
       ) => StopDecision | void | Promise<StopDecision | void>;
+    }
+  | {
+      event: "SessionEnd";
+      handler: (p: SessionEndPayload) => void | Promise<void>;
     };
 
 // ---------------------------------------------------------------------------

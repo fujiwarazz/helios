@@ -154,21 +154,6 @@ describe("输出截断（stopReason: max_tokens）—— 工具调用整批判�
   });
 });
 
-describe("工具接口隔离（requiredPorts）—— 工具拿不到自己没声明依赖的 Port", () => {
-  it("只声明 fileSystem 却越权访问 multiAgent：抛错、isError:true，不会跑到真实业务逻辑", async () => {
-    const { session, events } = await bootSession("mockLlmOverreach.ts", [
-      { port: "CapabilityProvider", package: fixture("mockCapabilityOverreach.ts") },
-    ]);
-
-    await session.sendMessage("go");
-
-    const toolEnd = events.find((e) => e.type === "tool_execution_end");
-    expect(toolEnd).toMatchObject({ isError: true });
-    expect(JSON.stringify(toolEnd)).toContain("未声明依赖 Port");
-    expect(JSON.stringify(toolEnd)).not.toContain("不该走到这里");
-  });
-});
-
 describe("Bug 7 —— 空 assistant 消息不入历史", () => {
   it("既无文本也无工具的回复：不产生 content:[] 空消息", async () => {
     const { session } = await bootSession("mockLlmEmpty.ts");

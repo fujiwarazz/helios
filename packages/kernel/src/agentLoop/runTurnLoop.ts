@@ -39,7 +39,7 @@ export interface RunTurnLoopResult {
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
   const { deps, tree, turnIdPrefix, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
-  const { provider, toolRegistry, hooks, ports, workDir, logger, askQuestion, signal, events } = deps;
+  const { provider, toolRegistry, hooks, workDir, logger, askQuestion, signal, events } = deps;
 
   const turnIds: string[] = [];
   let turnIndex = 0;
@@ -103,7 +103,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     }
 
     if (toolUseBlocks.length > 0) {
-      const toolCtx = { workDir, logger, ports, askQuestion, signal };
+      const toolCtx = { workDir, logger, askQuestion, signal };
       const { toolResultMsg, records } = await executeTools({
         turnId,
         toolUseBlocks,
