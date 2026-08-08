@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import type { Logger, AskQuestionRequest, AskQuestionResponse, Message } from "@helios/ports";
 import { Kernel, type Manifest } from "../src/index";
 import type { AgentEvent } from "../src/events";
+import { callLog as parallelCallLog } from "./fixtures/mockCapabilityParallel";
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -105,6 +106,51 @@ describe("Bug 5 —— 达到 turn 上限优雅结束并标注", () => {
     // 历史末尾是 tool_result（与 tool_use 配对），不留孤儿 tool_use
     const history = session.getHistory();
     expect(history[history.length - 1]?.role).toBe("toolResult");
+  });
+});
+
+describe("工具执行 —— 默认串行，声明 executionMode:'parallel' 才并发", () => {
+  it("两个都声明 parallel 的工具确实并发执行（执行区间重叠），结果仍按模型给出顺序组装", async () => {
+    parallelCallLog.length = 0;
+    const { session, events } = await bootSession("mockLlmParallel.ts", [
+      { port: "CapabilityProvider", package: fixture("mockCapabilityParallel.ts") },
+    ]);
+
+    await session.sendMessage("go");
+
+    expect(parallelCallLog).toHaveLength(2);
+    const [a, b] = parallelCallLog;
+    // 并发执行 = 两者执行区间有重叠（串行时后者 start 必然 >= 前者 end）。
+    const overlap = a.start < b.end && b.start < a.end;
+    expect(overlap).toBe(true);
+
+    // 结果消息仍按 toolUseBlocks 原始顺序（模型给出的顺序：toolA 先于 toolB）组装。
+    const history = session.getHistory();
+    const toolResult = history.find((m: Message) => m.role === "toolResult");
+    const blocks = toolResult?.content;
+    expect(Array.isArray(blocks) ? blocks.map((b: { toolUseId?: string }) => b.toolUseId) : []).toEqual([
+      "a1",
+      "b1",
+    ]);
+
+    const ends = events.filter((e) => e.type === "tool_execution_end");
+    expect(ends).toHaveLength(2);
+  });
+});
+
+describe("输出截断（stopReason: max_tokens）—— 工具调用整批判失败，不执行", () => {
+  it("参数碰巧是合法 JSON 也不执行，回传截断错误让 LLM 重试", async () => {
+    const { session, events } = await bootSession("mockLlmMaxTokens.ts", [
+      { port: "CapabilityProvider", package: fixture("mockCapability.ts") },
+    ]);
+
+    await session.sendMessage("go");
+
+    const toolEnd = events.find((e) => e.type === "tool_execution_end");
+    expect(toolEnd).toMatchObject({ isError: true });
+    expect(JSON.stringify(toolEnd)).toContain("截断");
+    // 未被真的执行：不应出现工具的正常输出格式 "echo:hi"。
+    expect(JSON.stringify(toolEnd)).not.toContain("echo:hi");
   });
 });
 

@@ -89,6 +89,12 @@ export interface Tool {
   name: string;
   description: string;
   inputSchema: JSONSchema;
+  /**
+   * 执行模式：'parallel' 表示该工具无副作用/可与同批次其它 parallel 工具并发执行；
+   * 缺省（undefined）视为 sequential —— 与现状行为一致（零破坏默认值）。只要本批
+   * tool_use 中有任一工具非 parallel，整批退化为顺序执行（详见 executeTools）。
+   */
+  executionMode?: "sequential" | "parallel";
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>;
 }
 
