@@ -1,4 +1,4 @@
-import type { StreamEvent } from "@helios/ports";
+import type { StreamEvent, StopReason, Usage } from "@helios/ports";
 import { mapFinishReason } from "./convert";
 
 /** OpenAI 流式 chunk 的最小结构（便于 fixture 单测，不强绑 SDK 类型）。 */
@@ -16,6 +16,25 @@ export interface OpenAIChunk {
     };
     finish_reason?: string | null;
   }>;
+  /** 需请求带 stream_options:{include_usage:true}；通常在末尾 choices 为空的 chunk 上出现。 */
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  } | null;
+}
+
+/** OpenAI usage → 统一 Usage：uncached = prompt - cached，cached 单列，OpenAI 无 cache write。 */
+function toUsage(u: NonNullable<OpenAIChunk["usage"]>): Usage {
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  const prompt = u.prompt_tokens ?? 0;
+  return {
+    uncachedInputTokens: Math.max(0, prompt - cached),
+    cachedInputTokens: cached,
+    cacheWriteTokens: 0,
+    outputTokens: u.completion_tokens ?? 0,
+    promptTokens: u.prompt_tokens != null ? prompt : undefined,
+  };
 }
 
 /**
@@ -28,9 +47,14 @@ export async function* mapOpenAIStream(
 ): AsyncGenerator<StreamEvent> {
   const indexToId = new Map<number, string>();
   const order: string[] = [];
-  let finished = false;
+  let sawFinish = false;
+  let stopReason: StopReason = "end_turn";
+  let usage: Usage | undefined;
 
   for await (const chunk of chunks) {
+    // usage 可能在 choices 为空的末尾 chunk 上单独到达（include_usage）。
+    if (chunk.usage) usage = toUsage(chunk.usage);
+
     const choice = chunk.choices?.[0];
     if (!choice) continue;
 
@@ -54,15 +78,16 @@ export async function* mapOpenAIStream(
       }
     }
 
-    if (choice.finish_reason) {
+    // 收到 finish_reason 即关闭工具块并记录停因；message-stop 延到流末尾统一 emit（等 usage）。
+    if (choice.finish_reason && !sawFinish) {
       for (const id of order) yield { type: "tool-call-end", id };
-      yield { type: "message-stop", stopReason: mapFinishReason(choice.finish_reason) };
-      finished = true;
+      stopReason = mapFinishReason(choice.finish_reason);
+      sawFinish = true;
     }
   }
 
-  if (!finished) {
+  if (!sawFinish) {
     for (const id of order) yield { type: "tool-call-end", id };
-    yield { type: "message-stop", stopReason: "end_turn" };
   }
+  yield { type: "message-stop", stopReason, usage };
 }

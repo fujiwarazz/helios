@@ -6,8 +6,21 @@ import {
   IMultiAgentPort,
   ICompactPort,
   ICheckpointPort,
+  IModelRouterPort,
+  ICostMeterPort,
+  IToolResultCachePort,
+  IVersionProviderPort,
 } from "./tokens";
-import { NoopMemory, NoopMultiAgent, NoopCompact, NoopCheckpoint } from "./noop";
+import {
+  NoopMemory,
+  NoopMultiAgent,
+  NoopCompact,
+  NoopCheckpoint,
+  NoopModelRouter,
+  NoopCostMeter,
+  NoopToolResultCache,
+  NoopVersionProvider,
+} from "./noop";
 
 /** 多实例 LLMProvider 注册表 */
 export class LiveLLMRegistry implements LLMRegistry {
@@ -62,6 +75,18 @@ export function createLivePortRegistry(
     },
     get checkpoint() {
       return services.tryGet(ICheckpointPort) ?? NoopCheckpoint;
+    },
+    get modelRouter() {
+      return services.tryGet(IModelRouterPort) ?? NoopModelRouter;
+    },
+    get costMeter() {
+      return services.tryGet(ICostMeterPort) ?? NoopCostMeter;
+    },
+    get toolCache() {
+      return services.tryGet(IToolResultCachePort) ?? NoopToolResultCache;
+    },
+    get versionProvider() {
+      return services.tryGet(IVersionProviderPort) ?? NoopVersionProvider;
     },
     llm,
   };

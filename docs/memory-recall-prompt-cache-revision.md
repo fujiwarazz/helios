@@ -1,4 +1,4 @@
-# Memory 召回与 Prompt Cache（对 branch-tree-and-prompt-cache.md「纪律一」的修订）
+# Memory 召回与 Prompt Cache（对 branch-tree-and-prompt-cache.md「纪律一」的修订） 【not impl】
 
 > 背景：PR #4（feat/branch-tree-cache）落地了「纪律一：system/memory 前缀每会话冻结一次，不每 run recall」。
 > 本文记录一次 Code Review 反馈：**冻结召回是"用大锤敲钉子"**——它为了缓存稳定，把 memory 逐轮召回一并冻死，run 2 起 memory 形同关闭。

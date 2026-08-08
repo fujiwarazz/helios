@@ -1,4 +1,4 @@
-import type { Message, StreamEvent, StopReason, Role } from "@helios/ports";
+import type { Message, StreamEvent, StopReason, Role, TaskCostReport } from "@helios/ports";
 
 /** 分层事件协议：agent_start → (turn_start → message_* → tool_execution_* → turn_end)+ → agent_end */
 export type AgentEvent =
@@ -23,6 +23,8 @@ export type AgentEvent =
       error?: string;
       /** run 因达到 turn 上限而提前结束（Bug 5）；自然结束时为 undefined */
       reachedMaxTurns?: boolean;
+      /** 本 run 的成本报告（CostMeter 产出；noop 时为全零报告）。 */
+      costReport?: TaskCostReport;
     };
 
 export interface ToolResultRecord {

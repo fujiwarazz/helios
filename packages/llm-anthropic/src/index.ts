@@ -6,6 +6,7 @@ import type {
   Tool,
   LLMOptions,
   StreamEvent,
+  Usage,
 } from "@helios/ports";
 import { LLM_PROVIDER_API_VERSION } from "@helios/ports";
 import {
@@ -76,10 +77,34 @@ class AnthropicProvider implements LLMProvider {
     // index → tool_use 的 block id，用于把 input_json_delta 归到正确的工具调用
     const indexToToolId = new Map<number, string>();
     let stopReason = "end_turn";
+    // 用量归一化：message_start 给输入侧（含 cache read/creation），message_delta 累积输出。
+    const usage: Usage = {
+      uncachedInputTokens: 0,
+      cachedInputTokens: 0,
+      cacheWriteTokens: 0,
+      outputTokens: 0,
+    };
 
     try {
       for await (const event of stream) {
         switch (event.type) {
+          case "message_start": {
+            const u = event.message?.usage as
+              | {
+                  input_tokens?: number;
+                  cache_read_input_tokens?: number;
+                  cache_creation_input_tokens?: number;
+                  output_tokens?: number;
+                }
+              | undefined;
+            if (u) {
+              usage.uncachedInputTokens = u.input_tokens ?? 0;
+              usage.cachedInputTokens = u.cache_read_input_tokens ?? 0;
+              usage.cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
+              usage.outputTokens = u.output_tokens ?? 0;
+            }
+            break;
+          }
           case "content_block_start": {
             const block = event.content_block;
             if (block.type === "tool_use") {
@@ -119,6 +144,9 @@ class AnthropicProvider implements LLMProvider {
           }
           case "message_delta": {
             if (event.delta.stop_reason) stopReason = event.delta.stop_reason;
+            // message_delta.usage 携带最终 output_tokens（累积值，直接覆盖）。
+            const du = event.usage as { output_tokens?: number } | undefined;
+            if (du?.output_tokens != null) usage.outputTokens = du.output_tokens;
             break;
           }
           case "message_stop":
@@ -127,7 +155,7 @@ class AnthropicProvider implements LLMProvider {
             break;
         }
       }
-      yield { type: "message-stop", stopReason: mapStopReason(stopReason) };
+      yield { type: "message-stop", stopReason: mapStopReason(stopReason), usage };
     } catch (err) {
       yield { type: "error", error: err instanceof Error ? err.message : String(err) };
     }

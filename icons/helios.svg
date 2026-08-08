@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 350 140" width="100%" height="100%">
+  <defs>
+    <!-- 定义字体样式，优先使用无衬线几何字体以贴合原图风格 -->
+    <style>
+      .logo-text {
+        font-family: 'Futura', 'Century Gothic', 'Montserrat', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-weight: 900;
+        font-size: 85px;
+        letter-spacing: -2px;
+      }
+    </style>
+    
+    <!-- 定义完整的文本 -->
+    <text id="logo-word" x="40" y="105" class="logo-text">helios</text>
+    
+    <!-- 定义 h 背后的太阳圆圈 (位置基于 h 字母进行偏移) -->
+    <circle id="sun-circle" cx="68" cy="60" r="38" />
+
+    <!-- 遮罩：用于显示圆圈【外部】的文字 -->
+    <mask id="mask-outside">
+      <rect width="100%" height="100%" fill="white" />
+      <use href="#sun-circle" fill="black" />
+    </mask>
+
+    <!-- 裁剪路径：用于显示圆圈【内部】的文字 -->
+    <clipPath id="clip-inside">
+      <use href="#sun-circle" />
+    </clipPath>
+  </defs>
+
+  <!-- 1. 徕卡经典的红色背景 -->
+  <rect width="100%" height="100%" fill="#DA121A" />
+
+  <!-- 2. 纯白色的太阳圆圈 -->
+  <use href="#sun-circle" fill="#FFFFFF" />
+
+  <!-- 3. 白色的文字（应用遮罩，只在圆圈外显示） -->
+  <use href="#logo-word" fill="#FFFFFF" mask="url(#mask-outside)" />
+
+  <!-- 4. 红色的文字（应用裁剪，只在圆圈内显示，形成完美反转镂空效果） -->
+  <use href="#logo-word" fill="#DA121A" clip-path="url(#clip-inside)" />
+</svg>
