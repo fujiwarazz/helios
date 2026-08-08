@@ -103,7 +103,7 @@ const bashTool: Tool = {
         cwd: ctx.workDir,
         timeout: cappedTimeout,
         reject: false,
-        signal: ctx.signal, // cancel 时中断命令
+        cancelSignal: ctx.signal, // cancel 时中断命令（execa 9 起改名，旧名 signal）
       });
       const out = [res.stdout, res.stderr].filter(Boolean).join("\n");
       return { output: out || `(exit ${res.exitCode})`, isError: res.exitCode !== 0 };

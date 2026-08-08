@@ -13,8 +13,17 @@ import { ToolRegistry } from "./toolRegistry";
 import { HookRunner } from "./hookRunner";
 import { loadPlugins, type Manifest, type PackageResolver } from "./pluginLoader";
 import { builtinCapabilityProvider } from "./builtin/provider";
-import { Session } from "./session";
+import { Session, type SessionMeta } from "./session";
 import { uid } from "./ids";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+
+/** 只读的 port/工具聚合信息，供 UI 的 Ports 页展示。 */
+export interface PortInfo {
+  provider: string;
+  tools: string[];
+  enabled: boolean;
+}
 
 const DEFAULT_SYSTEM =
   "你是 helios，一个可插拔的 AI 编程助手。使用可用的工具完成用户任务，保持简洁。";
@@ -134,6 +143,52 @@ export class Kernel {
 
   listTools(): string[] {
     return this.tools.list().map((t) => t.name);
+  }
+
+  /**
+   * 列出磁盘上的历史会话（读每个 `.helios/sessions/<id>/meta.json`）。
+   * 按 updatedAt 倒序；目录缺失或单条损坏时安全跳过。只读，不 resume。
+   */
+  async listSessions(): Promise<SessionMeta[]> {
+    const dir = join(this.opts.workDir, ".helios", "sessions");
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return []; // 尚无任何会话
+    }
+    const metas: SessionMeta[] = [];
+    for (const id of entries) {
+      try {
+        const raw = await readFile(join(dir, id, "meta.json"), "utf8");
+        const meta = JSON.parse(raw) as SessionMeta;
+        if (meta && typeof meta.id === "string") metas.push(meta);
+      } catch {
+        // 无 meta.json / 损坏 / 非目录：跳过
+      }
+    }
+    metas.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return metas;
+  }
+
+  /**
+   * 只读列出已装配的 port（按 provider 命名空间聚合工具）。
+   * 命名空间来自工具全名 `<provider>__<tool>`；无前缀的六件套归到 "builtin"。
+   */
+  listPorts(): PortInfo[] {
+    const byProvider = new Map<string, string[]>();
+    for (const name of this.listTools()) {
+      const sep = name.indexOf("__");
+      const provider = sep > 0 ? name.slice(0, sep) : "builtin";
+      const list = byProvider.get(provider) ?? [];
+      list.push(name);
+      byProvider.set(provider, list);
+    }
+    return [...byProvider.entries()].map(([provider, tools]) => ({
+      provider,
+      tools,
+      enabled: true,
+    }));
   }
 }
 

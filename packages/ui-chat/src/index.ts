@@ -3,7 +3,7 @@
 
 export { ChatView } from "./ChatView";
 export type { ChatViewProps } from "./ChatView";
-export { useChat, reduce, messagesToViews, initialState } from "./useChat";
+export { useChat, reduce, messagesToViews, initialState, markRunBoundaries, runIndexOf } from "./useChat";
 export type { RenderTool, ChatState, UseChatResult } from "./useChat";
 export { RpcChatClient } from "./RpcChatClient";
 export type {
@@ -11,4 +11,5 @@ export type {
   ConnectionState,
   ChatMessageView,
   ToolCallView,
+  AskQuestion,
 } from "./types";
