@@ -87,6 +87,21 @@ describe("mapOpenAIStream", () => {
     ]);
   });
 
+  it("maps reasoning_content to thinking-delta before text", async () => {
+    const events = await collect([
+      { choices: [{ delta: { reasoning_content: "let me think" } }] },
+      { choices: [{ delta: { reasoning_content: " more" } }] },
+      { choices: [{ delta: { content: "answer" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]);
+    expect(events).toEqual([
+      { type: "thinking-delta", text: "let me think" },
+      { type: "thinking-delta", text: " more" },
+      { type: "text-delta", text: "answer" },
+      { type: "message-stop", stopReason: "end_turn" },
+    ]);
+  });
+
   it("falls back to end_turn when stream ends without finish_reason", async () => {
     const events = await collect([{ choices: [{ delta: { content: "hi" } }] }]);
     expect(events).toEqual([

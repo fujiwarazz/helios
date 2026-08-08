@@ -149,9 +149,13 @@ export class Session {
       assistantMsg.turnId = turnId;
 
       // Bug 7：只有非空 assistant 消息才入历史/持久化，避免 content:[] 触发下游 API 报错。
+      // thinking 块不算有效正文——只思考不回答/不调工具视为空轮，不入历史。
+      // 语义（N3）：thinking-only 轮 = 丢弃该 assistant 消息 + 本 run 正常结束，不重试
+      //（区别于 valos 的判空重试；helios 暂不引入重试机制，保持最小实现）。
       const turnMessages: Message[] = [...pendingTurnLeadMessages];
       pendingTurnLeadMessages = [];
-      const assistantHasContent = Array.isArray(assistantMsg.content) && assistantMsg.content.length > 0;
+      const assistantHasContent =
+        Array.isArray(assistantMsg.content) && assistantMsg.content.some((b) => b.type !== "thinking");
       if (assistantHasContent) {
         this.history.push(assistantMsg);
         turnMessages.push(assistantMsg);
@@ -231,6 +235,8 @@ export class Session {
     this.emit({ type: "message_start", messageId, role: "assistant", turnId });
 
     let textAccum = "";
+    let thinkingAccum = "";
+    let thinkingSignature: string | undefined;
     const toolCalls = new Map<string, { name: string; args: string }>();
     const order: string[] = [];
     let stopReason: StopReason = "end_turn";
@@ -247,6 +253,12 @@ export class Session {
       switch (ev.type) {
         case "text-delta":
           textAccum += ev.text;
+          break;
+        case "thinking-delta":
+          thinkingAccum += ev.text;
+          break;
+        case "thinking-signature":
+          thinkingSignature = ev.signature;
           break;
         case "tool-call-start":
           toolCalls.set(ev.id, { name: ev.name, args: "" });
@@ -272,6 +284,11 @@ export class Session {
     }
 
     const content: ContentBlock[] = [];
+    // thinking 块置于最前（Anthropic 回传要求 thinking 先于 text/tool_use）。
+    // 限制（N1）：本轮所有 thinking-delta 合并为单个块、signature 取最后一个。
+    // Anthropic interleaved thinking（beta，多 thinking 块各自 signature）暂不支持。
+    if (thinkingAccum)
+      content.push({ type: "thinking", thinking: thinkingAccum, signature: thinkingSignature });
     if (textAccum) content.push({ type: "text", text: textAccum });
 
     // 流错误时丢弃可能被截断的残缺 tool_use（执行会误伤），仅保留已累计文本。

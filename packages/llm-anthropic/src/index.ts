@@ -45,23 +45,25 @@ class AnthropicProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
+    // extended thinking 与 temperature 互斥（Anthropic 硬约束）：开 thinking 时不传 temperature。
+    // 注：SDK 0.32 类型未覆盖 thinking，此处窄类型旁路（运行时服务端/网关按 JSON 透传）。
     const thinkingOn = opts.thinking?.enabled === true;
-    const budget = opts.thinking?.budgetTokens ?? 2048;
-    // thinking 开启时:max_tokens 必须 > budget；temperature 必须为默认(不可自定义)。
-    const maxTokens = opts.maxTokens ?? 4096;
+    const thinking = thinkingOn
+      ? { type: "enabled" as const, budget_tokens: opts.thinking?.budgetTokens ?? 10000 }
+      : undefined;
+
+    const createParams = {
+      model: opts.model ?? this.defaultModel,
+      max_tokens: opts.maxTokens ?? 4096,
+      temperature: thinkingOn ? undefined : opts.temperature,
+      system: opts.system,
+      messages: toAnthropicMessages(messages),
+      tools: tools.length ? toAnthropicTools(tools) : undefined,
+      stream: true as const,
+      ...(thinking ? { thinking } : {}),
+    };
     const stream = await this.client.messages.create(
-      {
-        model: opts.model ?? this.defaultModel,
-        max_tokens: thinkingOn ? Math.max(maxTokens, budget + 1024) : maxTokens,
-        temperature: thinkingOn ? undefined : opts.temperature,
-        system: opts.system,
-        messages: toAnthropicMessages(messages),
-        tools: tools.length ? toAnthropicTools(tools) : undefined,
-        ...(thinkingOn
-          ? { thinking: { type: "enabled" as const, budget_tokens: budget } }
-          : {}),
-        stream: true,
-      },
+      createParams as unknown as Anthropic.MessageCreateParamsStreaming,
       { signal: opts.signal },
     );
 
@@ -78,16 +80,26 @@ class AnthropicProvider implements LLMProvider {
               indexToToolId.set(event.index, block.id);
               yield { type: "tool-call-start", id: block.id, name: block.name };
             }
+            // ⚠️ 已知降级（S2）：redacted_thinking 块（type=redacted_thinking，内容在 data 字段、
+            // 无 delta）当前不透传——统一 StreamEvent 尚无对应事件，故静默丢弃。若该轮含 tool_use，
+            // 同样存在 thinking-precede-tool_use 的 400 边界（见 convert.ts S1 注释）。opaque 保真透传
+            // 需新增 StreamEvent/ContentBlock，对罕见场景不成比例，暂作降级并在 doc 记录。
             break;
           }
           case "content_block_delta": {
-            const delta = event.delta;
-            // thinking_delta 兼容旧版 SDK 类型(0.32 未收录该 delta 类型):按运行时字段判断。
-            const loose = delta as unknown as { type: string; thinking?: string };
+            // SDK 0.32 的 delta 联合类型不含 thinking_delta/signature_delta，
+            // 但运行时事件对象会带这些字段，故窄类型旁路读取。
+            const delta = event.delta as
+              | { type: "text_delta"; text: string }
+              | { type: "input_json_delta"; partial_json: string }
+              | { type: "thinking_delta"; thinking: string }
+              | { type: "signature_delta"; signature: string };
             if (delta.type === "text_delta") {
               yield { type: "text-delta", text: delta.text };
-            } else if (loose.type === "thinking_delta") {
-              yield { type: "thinking-delta", text: loose.thinking ?? "" };
+            } else if (delta.type === "thinking_delta") {
+              yield { type: "thinking-delta", text: delta.thinking };
+            } else if (delta.type === "signature_delta") {
+              yield { type: "thinking-signature", signature: delta.signature };
             } else if (delta.type === "input_json_delta") {
               const id = indexToToolId.get(event.index);
               if (id) yield { type: "tool-call-delta", id, argsDelta: delta.partial_json };

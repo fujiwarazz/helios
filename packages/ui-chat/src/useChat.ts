@@ -220,9 +220,11 @@ export function messagesToViews(
       continue;
     }
     let text = "";
+    let thinking = "";
     const tools: ToolCallView[] = [];
     for (const block of m.content as ContentBlock[]) {
       if (block.type === "text") text += block.text;
+      else if (block.type === "thinking") thinking += block.thinking;
       else if (block.type === "tool_use") {
         tools.push({
           id: block.id,
@@ -232,7 +234,7 @@ export function messagesToViews(
         });
       }
     }
-    views.push({ id: m.id, role: m.role, text, tools, turnId: m.turnId });
+    views.push({ id: m.id, role: m.role, text, tools, turnId: m.turnId, ...(thinking ? { thinking } : {}) });
   }
   return markRunBoundaries(views);
 }
