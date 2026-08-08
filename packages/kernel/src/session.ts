@@ -17,6 +17,16 @@ import { ToolRegistry } from "./toolRegistry";
 import { HookRunner } from "./hookRunner";
 import { uid } from "./ids";
 import type { AgentEvent, AgentEventListener, ToolResultRecord } from "./events";
+import { snapCompactionCut, reconstructPath, type CompactionRecord } from "./messageTree";
+
+/** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
+interface PersistedCompaction {
+  firstPostId: string | null;
+  summaryId: string;
+  firstKeptId: string | null;
+  summaryContent: string;
+  summaryParentId: string | null;
+}
 
 export interface SessionOptions {
   id: string;
@@ -70,10 +80,13 @@ export class Session {
   private readonly nodes = new Map<string, Message>();
   private headId: string | null = null;
   /**
-   * 压缩边界节点集合：pathToHead 走到带边界标记的 summary 节点即停止上溯，
-   * 从而把被压缩的旧节点排除出「发给 LLM 的路径」，但它们仍留在树里可回溯。
+   * 压缩记录（创建顺序）：压缩不改物理树，只记录「某 HEAD 处用 summary 取代其上游被覆盖区间」。
+   * `pathToHead` 按记录重建有效路径；作用域由 `firstPostId`（压缩后本分支追加的首个节点）是否在
+   * 当前 HEAD 祖先链上决定，因此兄弟分支（从更早节点分叉）不受影响。详见 messageTree.ts。
    */
-  private readonly compactionBoundaries = new Set<string>();
+  private readonly compactions: CompactionRecord[] = [];
+  /** summary 节点 id 集合：listBranches 据此排除 summary（否则会成幽灵分支叶子）。 */
+  private readonly summaryIds = new Set<string>();
   private runIndex = 0;
   private readonly listeners = new Set<AgentEventListener>();
   private readonly maxTurns: number;
@@ -105,18 +118,23 @@ export class Session {
   // 消息树核心
   // -------------------------------------------------------------------------
 
-  /** 从 HEAD 沿 parentId 上溯到根（或压缩边界），反转为时间正序 —— LLM 只看这条。 */
-  private pathToHead(): Message[] {
-    const path: Message[] = [];
-    let cur = this.headId;
+  /** 从 HEAD 沿 parentId 上溯到根的物理链（HEAD 在前）。物理父恒为物理节点，链中不含 summary。 */
+  private ancestorChain(from: string | null): Message[] {
+    const chain: Message[] = [];
+    let cur = from;
     while (cur) {
       const n = this.nodes.get(cur);
       if (!n) break;
-      path.push(n);
-      if (this.compactionBoundaries.has(n.id)) break; // 到压缩边界即止，不再上溯被压缩节点
+      chain.push(n);
       cur = n.parentId ?? null;
     }
-    return path.reverse();
+    return chain;
+  }
+
+  /** 发给 LLM 的有效路径（时间正序）：按压缩记录在物理链上重建，summary 替换被覆盖区间。 */
+  private pathToHead(): Message[] {
+    const chain = this.ancestorChain(this.headId);
+    return reconstructPath(chain, this.compactions, (id) => this.nodes.get(id));
   }
 
   /** 唯一顺序写入口：把 parentId 指向当前 HEAD，落库并前移 HEAD。 */
@@ -159,6 +177,7 @@ export class Session {
     const branches: BranchInfo[] = [];
     for (const n of this.nodes.values()) {
       if (hasChild.has(n.id)) continue; // 非叶子跳过
+      if (this.summaryIds.has(n.id)) continue; // summary 节点不是真实分支
       let depth = 0;
       let cur: string | null = n.id;
       while (cur) {
@@ -183,8 +202,8 @@ export class Session {
 
     this.emit({ type: "agent_start", runId });
 
-    // run 开始前：对当前路径按策略压缩（生成 summary 节点、移 HEAD；旧节点保留为旧分支）
-    await this.maybeCompact();
+    // run 开始前：对当前路径按策略压缩（生成 summary 节点 + 压缩记录；不改物理树、不移 HEAD）。
+    const pendingCompaction = await this.maybeCompact();
 
     // 缓存纪律一：system 前缀（base + memory 召回）每会话只算一次并冻结，之后每 run 复用。
     if (this.systemPrefix === null) {
@@ -195,11 +214,21 @@ export class Session {
     }
     const system = this.systemPrefix;
 
-    // run 起点 HEAD，用于收集本 run 新增的路径节点
-    const runStartHeadId = this.headId;
+    // 本 run 新增消息的起点：压缩后有效路径长度（compaction-safe，等价旧线性 history.length 切片）。
+    const before = this.pathToHead().length;
 
     const userMsg: Message = { id: uid("msg"), role: "user", content: text };
     this.appendNode(userMsg);
+
+    // 回填压缩记录的作用域锚点 = 压缩后本分支追加的首个节点（唯一属于本分支，避免误伤兄弟分支）。
+    if (pendingCompaction) {
+      pendingCompaction.firstPostId = userMsg.id;
+      try {
+        await this.writeCompactions();
+      } catch (err) {
+        this.opts.logger.warn(`压缩记录持久化失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
 
     const turnIds: string[] = [];
     let turnIndex = 0;
@@ -271,7 +300,7 @@ export class Session {
       logger.warn(`run ${runId} 达到 turn 上限 ${this.maxTurns}，提前结束`);
     }
 
-    const newMessages = this.pathAfter(runStartHeadId);
+    const newMessages = this.pathToHead().slice(before);
     this.emit({
       type: "agent_end",
       runId,
@@ -282,14 +311,6 @@ export class Session {
     });
     logger.debug(`run ${runId} 完成，共 ${turnIds.length} 个 turn`);
     return newMessages;
-  }
-
-  /** 当前路径上、位于 anchorId 之后的节点（anchorId=null 表示整条路径）。 */
-  private pathAfter(anchorId: string | null): Message[] {
-    const full = this.pathToHead();
-    if (anchorId === null) return full;
-    const idx = full.findIndex((m) => m.id === anchorId);
-    return idx < 0 ? full : full.slice(idx + 1);
   }
 
   private async streamAssistant(
@@ -469,60 +490,56 @@ export class Session {
   }
 
   /**
-   * run 开始前的历史压缩（树模型）：把被压缩区间浓缩为一个 summary 节点，
-   * 挂在被压缩区间「当前路径上最后一个被覆盖节点」之下（选法 A，保留血缘可回溯），
-   * 并标记为压缩边界 + 前移 HEAD。旧节点一个不删，作为「未压缩旧分支」随时可 switchBranch 回去。
-   * summary 节点只装摘要文本，不含 system/tools（那是独立稳定前缀，复制进节点会砸 cache 且 token 翻倍）。
-   * CompactStrategyPort 未加载时 shouldCompact 恒 false。
+   * run 开始前的历史压缩（压缩记录化）：把被压缩区间浓缩为一个 summary 节点，并记一条 CompactionRecord，
+   * 由 pathToHead 按记录重建有效路径。**不 mutate 任何既有节点、不移 HEAD** —— 兄弟分支天然不受影响，
+   * 旧节点一个不删仍可回溯。summary 节点只装摘要文本，不含 system/tools（那是独立稳定前缀，复制进节点
+   * 会砸 cache 且 token 翻倍）。CompactStrategyPort 未加载时 shouldCompact 恒 false。
    */
-  private async maybeCompact(): Promise<void> {
+  private async maybeCompact(): Promise<CompactionRecord | null> {
     const path = this.pathToHead();
-    if (path.length === 0) return;
+    if (path.length === 0) return null;
     const { ports } = this.opts;
     const state: ConversationState = {
       messages: path,
       approxTokens: approxTokens(path),
     };
-    if (!ports.compact.shouldCompact(state)) return;
+    if (!ports.compact.shouldCompact(state)) return null;
 
     this.emit({ type: "compact_start", messageCount: path.length });
     const summary = await ports.compact.compact([...path]);
     const covered = new Set(summary.coveredMessageIds);
 
-    // 当前路径上最后一个被覆盖节点的下标（选法 A：summary 挂其下，血缘相连可上溯完整旧历史）。
-    let lastCoveredIdx = -1;
-    for (let i = 0; i < path.length; i++) {
-      if (covered.has(path[i].id)) lastCoveredIdx = i;
-    }
+    // 安全切点（含 Q1 吸附：首个保留节点绝不为 toolResult，杜绝孤儿 tool_result → Anthropic 400）。
+    const lastCoveredIdx = snapCompactionCut(path, covered);
     if (lastCoveredIdx < 0) {
-      // 未覆盖任何节点：无可压缩，balance 事件后返回（正常不会走到，shouldCompact 命中才进来）。
+      // 无可安全压缩（未覆盖任何节点，或吸附后退空）：空过。
       this.emit({ type: "compact_end", summaryLength: summary.text.length, remaining: path.length });
-      return;
+      return null;
     }
 
     const summaryNode: Message = {
       id: uid("msg"),
       role: "user",
       content: `<compacted_history>\n${summary.text}\n</compacted_history>`,
-      parentId: path[lastCoveredIdx].id,
+      parentId: path[lastCoveredIdx].id, // 仅存血缘/归档；pathToHead 不走此指针
     };
     this.nodes.set(summaryNode.id, summaryNode);
-    this.compactionBoundaries.add(summaryNode.id); // pathToHead 到此即止，排除被压缩节点
+    this.summaryIds.add(summaryNode.id);
 
-    // 部分覆盖时把「未被覆盖的近端节点」接到 summary 之后，避免这段近期上下文被静默丢弃。
+    // 压缩记录化：不 mutate 任何既有节点、不移 HEAD（兄弟分支天然不受影响，Q3 修复核心）。
+    // firstPostId 待 sendMessage 追加 userMsg 后回填（作用域锚点必须唯一属于本分支）。
     const tail = path.slice(lastCoveredIdx + 1);
-    if (tail.length > 0) {
-      tail[0].parentId = summaryNode.id; // 重接：summary → 近端 tail → ... → 原 HEAD
-      this.moveHead(this.headId); // HEAD 不变但路径已重排，广播一次让订阅方刷新
-    } else {
-      this.moveHead(summaryNode.id); // 全覆盖：HEAD 移到 summary
-    }
+    const record: CompactionRecord = {
+      firstPostId: null,
+      summaryId: summaryNode.id,
+      firstKeptId: tail[0]?.id ?? null,
+    };
+    this.compactions.push(record);
 
-    this.emit({
-      type: "compact_end",
-      summaryLength: summary.text.length,
-      remaining: this.pathToHead().length,
-    });
+    // summary(1) + 保留 tail 长度；firstPostId 尚未回填，故不能用 pathToHead 现算。
+    const remaining = 1 + tail.length;
+    this.emit({ type: "compact_end", summaryLength: summary.text.length, remaining });
+    return record;
   }
 
   private async persistTurn(record: TurnRecord): Promise<void> {
@@ -561,6 +578,26 @@ export class Session {
     await writeFile(join(dir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
   }
 
+  /** 全量重写压缩记录（含 summary 节点内容），供跨 resume 恢复压缩视图。 */
+  private async writeCompactions(): Promise<void> {
+    const dir = this.turnsDir();
+    await mkdir(dir, { recursive: true });
+    const body = this.compactions
+      .map((c) => {
+        const node = this.nodes.get(c.summaryId);
+        const rec: PersistedCompaction = {
+          firstPostId: c.firstPostId,
+          summaryId: c.summaryId,
+          firstKeptId: c.firstKeptId,
+          summaryContent: typeof node?.content === "string" ? node.content : "",
+          summaryParentId: node?.parentId ?? null,
+        };
+        return JSON.stringify(rec);
+      })
+      .join("\n");
+    await writeFile(join(dir, "compactions.jsonl"), body ? body + "\n" : "", "utf8");
+  }
+
   /**
    * 从磁盘 resume：读回 turns.jsonl 全量回放重建消息树 + turnLog，读 meta.json 恢复
    * title/createdAt，并把 runIndex 续到最大已用 run 之后（新 run index 自然递增不冲突）。
@@ -591,7 +628,8 @@ export class Session {
 
     this.nodes.clear();
     this.headId = null;
-    this.compactionBoundaries.clear();
+    this.compactions.length = 0;
+    this.summaryIds.clear();
     this.turnLog.length = 0;
     let maxRunIndex = -1;
     for (const line of lines) {
@@ -611,8 +649,38 @@ export class Session {
       if (rec.runIndex > maxRunIndex) maxRunIndex = rec.runIndex;
     }
     this.runIndex = maxRunIndex + 1;
+
+    // 压缩记录（可选文件）：重建 summary 节点 + 记录，恢复压缩视图。老会话无此文件 → 跳过（向后兼容）。
+    try {
+      const rawC = await readFile(join(dir, "compactions.jsonl"), "utf8");
+      for (const line of rawC.split("\n").filter((l) => l.trim())) {
+        let pc: PersistedCompaction;
+        try {
+          pc = JSON.parse(line) as PersistedCompaction;
+        } catch {
+          this.opts.logger.warn(`跳过损坏的压缩记录：${line.slice(0, 80)}`);
+          continue;
+        }
+        // 重建 summary 节点（保留原 id/parentId，不经 appendNode）。
+        this.nodes.set(pc.summaryId, {
+          id: pc.summaryId,
+          role: "user",
+          content: pc.summaryContent,
+          parentId: pc.summaryParentId,
+        });
+        this.compactions.push({
+          firstPostId: pc.firstPostId,
+          summaryId: pc.summaryId,
+          firstKeptId: pc.firstKeptId,
+        });
+        this.summaryIds.add(pc.summaryId);
+      }
+    } catch {
+      // 无压缩记录文件：跳过
+    }
+
     this.opts.logger.info(
-      `会话 ${this.id} 已 resume：turns=${this.turnLog.length} 历史消息=${this.nodes.size} 下一 run=${this.runIndex}`,
+      `会话 ${this.id} 已 resume：turns=${this.turnLog.length} 历史消息=${this.nodes.size} 压缩记录=${this.compactions.length} 下一 run=${this.runIndex}`,
     );
     return this.turnLog.length > 0;
   }
@@ -633,9 +701,21 @@ export class Session {
     this.moveHead(target.anchorNodeId);
     // 丢弃该 turn 及其后的所有 turn 记录，并重写日志（新对话将从锚点长出新分支）。
     this.turnLog.length = idx;
+    // prune 掉不再适用于新 HEAD 的压缩记录（firstPostId 不在新 HEAD 祖先链上）。
+    const chainIds = new Set(this.ancestorChain(this.headId).map((n) => n.id));
+    const keptCompactions = this.compactions.filter(
+      (c) => c.firstPostId !== null && chainIds.has(c.firstPostId),
+    );
+    if (keptCompactions.length !== this.compactions.length) {
+      this.compactions.length = 0;
+      this.compactions.push(...keptCompactions);
+      this.summaryIds.clear();
+      for (const c of this.compactions) this.summaryIds.add(c.summaryId);
+    }
     try {
       await this.writeTurnLog();
       await this.writeMeta();
+      await this.writeCompactions();
     } catch (err) {
       this.opts.logger.warn(`turns 日志重写失败：${err instanceof Error ? err.message : String(err)}`);
     }

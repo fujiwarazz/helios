@@ -130,3 +130,86 @@ describe("compact-on-tree —— 部分覆盖不丢近端上下文", () => {
     expect(history.some((m) => textOf(m).includes("BETA_SECOND_USER"))).toBe(true);
   });
 });
+
+describe("compact-on-tree —— Q3：压缩不误伤共享 tail 节点的兄弟分支", () => {
+  it("主线压缩（tail[0] 为共享节点）后，从该共享节点分叉的兄弟分支历史完整不被截断", async () => {
+    const kernel = new Kernel({
+      workDir,
+      manifest: {
+        plugins: [
+          { port: "FileSystemPort", package: "@helios/fs-node" },
+          { port: "CompactStrategyPort", package: fixture("mockCompactOnceAll.ts") },
+          { port: "LLMProvider", package: fixture("mockLlmCounter.ts") },
+        ],
+      },
+      logger: silent,
+    });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    // 建主线：U1_MARK / U2 —— 两 run，路径达 4 条（下一 run 起点触发一次性压缩）。
+    await session.sendMessage("U1_MARK");
+    await session.sendMessage("U2");
+    const afterTwo = session.getHistory();
+    const sharedNodeId = afterTwo[afterTwo.length - 1].id; // = a2，将成为压缩后保留的 tail[0]（共享节点）
+
+    // 第三个 run 起点 path 长度=4 → 一次性压缩：覆盖 {u1,a1,u2}，保留 a2（tail[0]=共享节点）。
+    await session.sendMessage("U3");
+    const mainLeafId = session.getHistory()[session.getHistory().length - 1].id;
+    const mainHistory = session.getHistory();
+    // 主线视图：summary 在、被覆盖的 U1_MARK 移出
+    expect(mainHistory.some((m) => textOf(m).includes("COMPACTED_ONCE"))).toBe(true);
+    expect(mainHistory.some((m) => textOf(m).includes("U1_MARK"))).toBe(false);
+
+    // 从共享节点 a2 分叉出兄弟分支（该分支自身不触发压缩：一次性策略已用尽）。
+    session.fork(sharedNodeId);
+    await session.sendMessage("SIBLING_LEAF");
+    const sibLeafId = session.getHistory()[session.getHistory().length - 1].id;
+
+    // 关键断言：兄弟分支未参与压缩，压缩前的早期历史（U1_MARK）必须仍在，且不含 summary。
+    const sibHistory = session.getHistory();
+    expect(sibHistory.some((m) => textOf(m).includes("U1_MARK"))).toBe(true);
+    expect(sibHistory.some((m) => textOf(m).includes("SIBLING_LEAF"))).toBe(true);
+    expect(sibHistory.some((m) => textOf(m).includes("COMPACTED_ONCE"))).toBe(false);
+
+    // 切回主线仍是压缩视图，互不串味。
+    session.switchBranch(mainLeafId);
+    const backMain = session.getHistory();
+    expect(backMain.some((m) => textOf(m).includes("COMPACTED_ONCE"))).toBe(true);
+    expect(backMain.some((m) => textOf(m).includes("U1_MARK"))).toBe(false);
+    void sibLeafId;
+  });
+});
+
+describe("compact-on-tree —— 压缩记录跨 resume 持久化", () => {
+  it("resume 后仍是压缩视图（summary 在、被覆盖内容不在），而非全量历史", async () => {
+    const buildManifest = (): Manifest => ({
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CompactStrategyPort", package: fixture("mockCompactPartial.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmCounter.ts") },
+      ],
+    });
+
+    const k1 = new Kernel({ workDir, manifest: buildManifest(), logger: silent });
+    await k1.start();
+    const s1 = k1.createSession({ askQuestion: noAsk });
+    await s1.sendMessage("ALPHA_U1");
+    await s1.sendMessage("BETA_U2"); // run2 起点触发部分覆盖压缩：覆盖 {u1}，保留 a1
+    const sid = s1.id;
+    // 压缩已生效：ALPHA_U1 移出、summary 在
+    expect(s1.getHistory().some((m) => textOf(m).includes("ALPHA_U1"))).toBe(false);
+    expect(s1.getHistory().some((m) => textOf(m).includes("COMPACTED_PARTIAL"))).toBe(true);
+
+    // 全新 Kernel resume
+    const k2 = new Kernel({ workDir, manifest: buildManifest(), logger: silent });
+    await k2.start();
+    const s2 = await k2.resumeSession(sid, { askQuestion: noAsk });
+
+    const restored = s2.getHistory();
+    // 压缩视图被恢复：被覆盖的 ALPHA_U1 仍不在路径、summary 仍在（未回退成全量历史）
+    expect(restored.some((m) => textOf(m).includes("ALPHA_U1"))).toBe(false);
+    expect(restored.some((m) => textOf(m).includes("COMPACTED_PARTIAL"))).toBe(true);
+    expect(restored.some((m) => textOf(m).includes("BETA_U2"))).toBe(true);
+  });
+});
