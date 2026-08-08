@@ -25,6 +25,17 @@ export {
   MultiAgentNotEnabledError,
 } from "./noop";
 export { builtinCapabilityProvider } from "./builtin/provider";
-export { BUILTIN_TOOLS } from "./builtin/tools";
+export {
+  createBuiltinTools,
+  createBashTool,
+  createReadTool,
+  createWriteTool,
+  createEditTool,
+  createGlobTool,
+  createGrepTool,
+  createWebFetchTool,
+  createAskQuestionTool,
+  createTaskTool,
+} from "./builtin/tools";
 export type { AgentEvent, AgentEventListener, ToolResultRecord } from "./events";
 export { uid } from "./ids";

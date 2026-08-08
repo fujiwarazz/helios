@@ -2,12 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { KernelContext, Logger, PortRegistry, ToolContext } from "@helios/ports";
+import type { KernelContext, Logger, ToolContext } from "@helios/ports";
 import { create as createFs } from "@helios/fs-node";
-import { BUILTIN_TOOLS, assertFetchUrlAllowed } from "./tools";
+import { createBashTool, createGrepTool, assertFetchUrlAllowed } from "./tools";
 
-const bashTool = BUILTIN_TOOLS.find((t) => t.name === "Bash")!;
-const grepTool = BUILTIN_TOOLS.find((t) => t.name === "Grep")!;
+const bashTool = createBashTool();
 
 const silent: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
@@ -62,7 +61,6 @@ describe("Bash —— signal 中断生效", () => {
     const ctx = {
       workDir: tmpdir(),
       logger: silent,
-      ports: {} as unknown as PortRegistry,
       signal: ac.signal,
       askQuestion: async () => ({ answers: [] }),
     } as ToolContext;
@@ -76,7 +74,6 @@ describe("Bash —— signal 中断生效", () => {
     const ctx = {
       workDir: tmpdir(),
       logger: silent,
-      ports: {} as unknown as PortRegistry,
       askQuestion: async () => ({ answers: [] }),
     } as ToolContext;
     // 正常快命令：timeout=0 时应正常返回（若 0 被当"永不超时"也不影响此断言），
@@ -97,10 +94,11 @@ describe("Grep —— 跳过二进制文件", () => {
   it("含 NUL 字节的文件被跳过，只命中文本文件", async () => {
     await writeFile(join(workDir, "text.txt"), "hello NEEDLE world");
     await writeFile(join(workDir, "bin.dat"), "NEEDLE\u0000\u0001binary");
+    const fileSystem = createFs({ workDir } as unknown as KernelContext);
+    const grepTool = createGrepTool(fileSystem);
     const ctx = {
       workDir,
       logger: silent,
-      ports: { fileSystem: createFs({ workDir } as unknown as KernelContext) } as unknown as PortRegistry,
       askQuestion: async () => ({ answers: [] }),
     } as ToolContext;
     const res = await grepTool.execute({ pattern: "NEEDLE" }, ctx);

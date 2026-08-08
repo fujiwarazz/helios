@@ -92,7 +92,6 @@ describe("@helios/capability-fs", () => {
     const res = await tools.find((t) => t.name === "demo")!.execute({}, {
       workDir,
       logger: silent,
-      ports: ctx.ports,
       askQuestion: async () => ({ answers: [] }),
     });
     expect(res.output).toContain("Demo Skill");

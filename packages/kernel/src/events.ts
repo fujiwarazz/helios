@@ -33,3 +33,12 @@ export interface ToolResultRecord {
 }
 
 export type AgentEventListener = (event: AgentEvent) => void;
+
+/**
+ * agentLoop 内部（streamAssistant/executeTools/runTurnLoop）发事件的统一出口。
+ * 包一层接口而不是裸传 `(event: AgentEvent) => void`：调用方（Session）之外的实现可以在不
+ * 改变任何函数签名的前提下扩展行为（比如缓冲、去重、按 scope 过滤），CR 意见对齐 valos 的做法。
+ */
+export interface AgentEventEmitter {
+  emit(event: AgentEvent): void;
+}
