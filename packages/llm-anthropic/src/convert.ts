@@ -56,18 +56,36 @@ function toAnthropicBlocks(
   content: string | ContentBlock[],
 ): AnthropicMessageParam["content"] {
   if (typeof content === "string") return content;
-  const blocks: BlockParam[] = [];
+  // thinking 块必须置于 text/tool_use 之前，且回传需带 signature（Anthropic 硬约束）；
+  // 无 signature 的 thinking 块无法通过校验，直接丢弃而非发出非法请求。
+  // ⚠️ 已知边界（S1）：当 thinking 开启且同一 assistant 消息含 tool_use，Anthropic 要求
+  // tool_use 前必须有带 signature 的 thinking/redacted_thinking 块。若历史里的 thinking 无
+  // signature（如 OpenAI 路径产出后切到 Anthropic），此处丢弃会使该轮缺失 thinking → 可能 400。
+  // 无法伪造 signature，故当前仅作限制记录；单 provider 会话不会触发（signature 必随 thinking 到达）。
+  const thinkingBlocks: BlockParam[] = [];
+  const otherBlocks: BlockParam[] = [];
   for (const b of content) {
-    if (b.type === "text") blocks.push({ type: "text", text: b.text });
-    else if (b.type === "tool_use")
-      blocks.push({
+    if (b.type === "thinking") {
+      // SDK 0.32 的 BlockParam 联合未含 thinking 块，窄类型旁路（运行时服务端按 JSON 接收）。
+      if (b.signature) {
+        thinkingBlocks.push({
+          type: "thinking",
+          thinking: b.thinking,
+          signature: b.signature,
+        } as unknown as BlockParam);
+      }
+    } else if (b.type === "text") {
+      otherBlocks.push({ type: "text", text: b.text });
+    } else if (b.type === "tool_use") {
+      otherBlocks.push({
         type: "tool_use",
         id: b.id,
         name: b.name,
         input: (b.input ?? {}) as Record<string, unknown>,
       });
+    }
   }
-  return blocks;
+  return [...thinkingBlocks, ...otherBlocks];
 }
 
 function toToolResultBlocks(

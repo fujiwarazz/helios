@@ -8,7 +8,7 @@ import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
 import { RpcClient } from "@helios/protocol/browser";
 import type { ConnectionState } from "@helios/protocol/browser";
-import type { IChatClient } from "./types";
+import type { IChatClient, AskQuestion } from "./types";
 
 export class RpcChatClient implements IChatClient {
   /** 缓存 sessionId 的 Promise,避免重复 call。 */
@@ -53,5 +53,28 @@ export class RpcChatClient implements IChatClient {
 
   async rollback(turnId: string): Promise<void> {
     await this.rpc.call("rollback", { turnId });
+  }
+
+  async cancel(): Promise<void> {
+    await this.rpc.call("cancel");
+  }
+
+  onAsk(cb: (q: AskQuestion) => void): () => void {
+    // 与 onEvent 同构:订阅 ask:<sessionId> 频道,收到审批提问转给回调。
+    let disposed = false;
+    let dispose: (() => void) | undefined;
+    void this.sessionId().then((id) => {
+      if (disposed) return;
+      const sub = this.rpc.on(`ask:${id}`, (payload) => cb(payload as AskQuestion));
+      dispose = sub.dispose;
+    });
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }
+
+  async answer(questionId: string, answers: string[]): Promise<void> {
+    await this.rpc.call("answerQuestion", { questionId, answers });
   }
 }

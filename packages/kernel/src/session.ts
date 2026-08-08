@@ -97,6 +97,8 @@ export class Session {
    * 缓存纪律一：不每 run recall，避免 system 前缀漂移导致 prompt cache 永不命中。
    */
   private systemPrefix: string | null = null;
+  /** 当前 run 的中断控制器，其 signal 贯通到工具（Bash/WebFetch），支持 cancel。 */
+  private currentAbort: AbortController | null = null;
   private createdAt = Date.now();
   private title = "";
 
@@ -112,6 +114,11 @@ export class Session {
 
   private emit(event: AgentEvent): void {
     for (const l of this.listeners) l(event);
+  }
+
+  /** 中断当前 run：触发 signal，让正在执行的工具（Bash/WebFetch）尽快停止。 */
+  cancel(): void {
+    this.currentAbort?.abort();
   }
 
   // -------------------------------------------------------------------------
@@ -200,6 +207,9 @@ export class Session {
     const runIndex = this.runIndex++;
     if (!this.title) this.title = text.slice(0, 60);
 
+    const abort = new AbortController();
+    this.currentAbort = abort;
+
     this.emit({ type: "agent_start", runId });
 
     // run 开始前：对当前路径按策略压缩（生成 summary 节点 + 压缩记录；不改物理树、不移 HEAD）。
@@ -219,6 +229,11 @@ export class Session {
 
     const userMsg: Message = { id: uid("msg"), role: "user", content: text };
     this.appendNode(userMsg);
+    // 广播用户消息事件：让订阅端(UI)在 run 进行中即可显示用户气泡，无需等 run 结束 getHistory。
+    // 用户文本不流式，一次性 start+delta+end。
+    this.emit({ type: "message_start", messageId: userMsg.id, role: "user", turnId: "" });
+    this.emit({ type: "message_update", messageId: userMsg.id, delta: { type: "text-delta", text } });
+    this.emit({ type: "message_end", messageId: userMsg.id, role: "user" });
 
     // 回填压缩记录的作用域锚点 = 压缩后本分支追加的首个节点（唯一属于本分支，避免误伤兄弟分支）。
     if (pendingCompaction) {
@@ -236,6 +251,7 @@ export class Session {
     let runError: string | undefined; // Bug 3：LLM 流错误信息，用于 agent_end 优雅标注
 
     while (turnIndex < this.maxTurns) {
+      if (abort.signal.aborted) break; // 已中断：不再开新 turn
       const turnId = `${this.id}-${runIndex}-${turnIndex}`;
       turnIds.push(turnId);
       // turn 前锚点 = 此刻 HEAD（本 turn assistant 之前的节点），供回溯定位。
@@ -243,16 +259,23 @@ export class Session {
       const checkpointRef = await ports.checkpoint.snapshot(turnId);
       this.emit({ type: "turn_start", turnId });
 
-      const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = await this.streamAssistant(
-        turnId,
-        system,
-      );
+      let streamed: Awaited<ReturnType<Session["streamAssistant"]>>;
+      try {
+        streamed = await this.streamAssistant(turnId, system);
+      } catch (err) {
+        // 中断导致的流异常（AbortError）视为正常停止，不向上抛
+        if (abort.signal.aborted) break;
+        throw err;
+      }
+      const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = streamed;
       assistantMsg.turnId = turnId;
 
       // Bug 7：只有非空 assistant 消息才入树/持久化，避免 content:[] 触发下游 API 报错。
+      // thinking 块不算有效正文——只思考不回答/不调工具视为空轮，不入树（N3：丢弃 + 本 run 正常结束，不重试）。
       const turnMessages: Message[] = [...pendingTurnLeadMessages];
       pendingTurnLeadMessages = [];
-      const assistantHasContent = Array.isArray(assistantMsg.content) && assistantMsg.content.length > 0;
+      const assistantHasContent =
+        Array.isArray(assistantMsg.content) && assistantMsg.content.some((b) => b.type !== "thinking");
       if (assistantHasContent) {
         this.appendNode(assistantMsg);
         turnMessages.push(assistantMsg);
@@ -301,6 +324,7 @@ export class Session {
     }
 
     const newMessages = this.pathToHead().slice(before);
+    if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",
       runId,
@@ -331,15 +355,18 @@ export class Session {
     this.emit({ type: "message_start", messageId, role: "assistant", turnId });
 
     let textAccum = "";
+    let thinkingAccum = "";
+    let thinkingSignature: string | undefined;
     const toolCalls = new Map<string, { name: string; args: string }>();
     const order: string[] = [];
     let stopReason: StopReason = "end_turn";
     let streamError: string | undefined;
 
-    // 缓存前提：只发 pathToHead() 这条内容稳定、前缀不漂移的路径。
+    // 缓存前提：只发 pathToHead() 这条内容稳定、前缀不漂移的路径。signal 贯通以支持 cancel。
     const gen = provider.streamMessage(this.pathToHead(), this.opts.tools.list(), {
       ...llmOptions,
       system,
+      signal: this.currentAbort?.signal,
     });
 
     for await (const ev of gen) {
@@ -347,6 +374,12 @@ export class Session {
       switch (ev.type) {
         case "text-delta":
           textAccum += ev.text;
+          break;
+        case "thinking-delta":
+          thinkingAccum += ev.text;
+          break;
+        case "thinking-signature":
+          thinkingSignature = ev.signature;
           break;
         case "tool-call-start":
           toolCalls.set(ev.id, { name: ev.name, args: "" });
@@ -372,6 +405,8 @@ export class Session {
     }
 
     const content: ContentBlock[] = [];
+    // thinking 块须置于文本/工具之前（Anthropic 要求 thinking 在 assistant 内容最前）。
+    if (thinkingAccum) content.push({ type: "thinking", thinking: thinkingAccum, signature: thinkingSignature });
     if (textAccum) content.push({ type: "text", text: textAccum });
 
     // 流错误时丢弃可能被截断的残缺 tool_use（执行会误伤），仅保留已累计文本。
@@ -410,6 +445,7 @@ export class Session {
       logger,
       ports,
       askQuestion: this.opts.askQuestion,
+      signal: this.currentAbort?.signal,
     };
     const resultBlocks: ContentBlock[] = [];
     const records: ToolResultRecord[] = [];

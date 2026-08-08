@@ -6,6 +6,8 @@ export interface OpenAIChunk {
   choices?: Array<{
     delta?: {
       content?: string | null;
+      /** 非标准字段：DeepSeek-R1 等推理模型把思考过程放这里，归一化为 thinking-delta。 */
+      reasoning_content?: string | null;
       tool_calls?: Array<{
         index: number;
         id?: string;
@@ -33,6 +35,9 @@ export async function* mapOpenAIStream(
     if (!choice) continue;
 
     const delta = choice.delta;
+    if (delta?.reasoning_content) {
+      yield { type: "thinking-delta", text: delta.reasoning_content };
+    }
     if (delta?.content) {
       yield { type: "text-delta", text: delta.content };
     }

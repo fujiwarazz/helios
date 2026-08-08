@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { describe, it, expect, afterEach } from "vitest";
+import { act, renderHook, cleanup } from "@testing-library/react";
 import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
 import { useChat, reduce, initialState, type ChatState } from "./useChat";
 import type { IChatClient, ConnectionState } from "./types";
+
+afterEach(cleanup);
 
 /** 可手动 emit 事件 / 切状态的 mock client。 */
 function makeMockClient(history: Message[] = []): {
@@ -33,11 +35,13 @@ function makeMockClient(history: Message[] = []): {
 }
 
 const runStart: AgentEvent = { type: "agent_start", runId: "r1" };
-const msgStart: AgentEvent = { type: "message_start", messageId: "m1", role: "assistant", turnId: "t1" };
+// turnId 用真实格式 `${sessionId}-${runIndex}-${turnIndex}`,便于 runIndex 解析。
+const TURN = "sess-0-0";
+const msgStart: AgentEvent = { type: "message_start", messageId: "m1", role: "assistant", turnId: TURN };
 const delta = (text: string): AgentEvent => ({ type: "message_update", messageId: "m1", delta: { type: "text-delta", text } });
 const toolStart: AgentEvent = { type: "tool_execution_start", toolUseId: "u1", name: "Read", input: { path: "a" } };
 const toolEnd: AgentEvent = { type: "tool_execution_end", toolUseId: "u1", output: "ok", isError: false };
-const runEnd: AgentEvent = { type: "agent_end", runId: "r1", turnIds: ["t1"], newMessages: [] };
+const runEnd: AgentEvent = { type: "agent_end", runId: "r1", turnIds: [TURN], newMessages: [] };
 
 describe("useChat", () => {
   it("文本累加 + 工具卡片状态流转 + isStreaming 翻转", async () => {
@@ -113,5 +117,34 @@ describe("reduce —— 幂等 / 容忍乱序 / 重复", () => {
     // update 早到时先建消息;后来的 message_start 命中同 id 被忽略(幂等),文本按到达顺序拼接
     const m = s.messages.find((x) => x.id === "m1")!;
     expect(m.text).toBe("ABC");
+  });
+
+  it("agent_end 只在 run 最后一条 assistant 打回溯入口,目标为该 run 首 turn", () => {
+    const s = apply([
+      { type: "message_start", messageId: "m1", role: "assistant", turnId: "sess-0-0" },
+      { type: "message_update", messageId: "m1", delta: { type: "text-delta", text: "步骤1" } },
+      { type: "turn_end", turnId: "sess-0-0", toolResults: [] },
+      { type: "message_start", messageId: "m2", role: "assistant", turnId: "sess-0-1" },
+      { type: "message_update", messageId: "m2", delta: { type: "text-delta", text: "步骤2" } },
+      { type: "turn_end", turnId: "sess-0-1", toolResults: [] },
+      { type: "agent_end", runId: "r1", turnIds: ["sess-0-0", "sess-0-1"], newMessages: [] },
+    ]);
+    const m1 = s.messages.find((x) => x.id === "m1")!;
+    const m2 = s.messages.find((x) => x.id === "m2")!;
+    expect(m1.isRunBoundary).toBeFalsy();
+    expect(m2.isRunBoundary).toBe(true);
+    expect(m2.rollbackTurnId).toBe("sess-0-0");
+  });
+
+  it("thinking-delta 累积到 thinking 字段,与正文分开", () => {
+    const s = apply([
+      { type: "message_start", messageId: "m1", role: "assistant", turnId: "sess-0-0" },
+      { type: "message_update", messageId: "m1", delta: { type: "thinking-delta", text: "先想想…" } },
+      { type: "message_update", messageId: "m1", delta: { type: "thinking-delta", text: "再想想。" } },
+      { type: "message_update", messageId: "m1", delta: { type: "text-delta", text: "答案是 42" } },
+    ]);
+    const m = s.messages.find((x) => x.id === "m1")!;
+    expect(m.thinking).toBe("先想想…再想想。");
+    expect(m.text).toBe("答案是 42");
   });
 });
