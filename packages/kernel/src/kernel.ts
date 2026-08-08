@@ -11,6 +11,7 @@ import { IFileSystemPort } from "./tokens";
 import { LiveLLMRegistry, createLivePortRegistry } from "./portRegistry";
 import { ToolRegistry } from "./toolRegistry";
 import { HookRunner } from "./hookRunner";
+import { loadHookConfig, toHookBindings } from "./hookConfigLoader";
 import { loadPlugins, type Manifest, type PackageResolver } from "./pluginLoader";
 import { builtinCapabilityProvider } from "./builtin/provider";
 import { Session, type SessionMeta } from "./session";
@@ -36,6 +37,8 @@ export interface KernelOptions {
   llmOptions?: LLMOptions;
   /** 宿主提供的裸包解析器，锚定到宿主自身依赖（如 `(s) => import.meta.resolve(s)`）。 */
   resolvePackage?: PackageResolver;
+  /** 覆盖 hook 命令默认超时（毫秒），主要用于测试/宿主定制，不改变配置加载来源。 */
+  hookCommandTimeoutMs?: number;
 }
 
 export interface CreateSessionOptions {
@@ -87,6 +90,17 @@ export class Kernel {
     for (const cap of capabilities) {
       await this.activateProvider(cap, ctx, false);
     }
+
+    // 配置化 hook：读 ~/.helios/hooks.json + <workDir>/.helios/hooks.json，与 CapabilityProvider
+    // 注册的 hook 并列（HookRunner.register 可多次调用），循环触发点不感知来源。
+    const hookEntries = await loadHookConfig(this.opts.workDir, this.logger);
+    this.hooks.register(
+      toHookBindings(hookEntries, {
+        workDir: this.opts.workDir,
+        logger: this.logger,
+        timeoutMs: this.opts.hookCommandTimeoutMs,
+      }),
+    );
 
     this.started = true;
     this.logger.info(

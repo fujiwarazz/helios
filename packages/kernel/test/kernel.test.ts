@@ -1,11 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger, AskQuestionRequest, AskQuestionResponse, Message } from "@helios/ports";
 import { Kernel, type Manifest } from "../src/index";
 import type { AgentEvent } from "../src/events";
+import { calls as hookCalls, behavior as hookBehavior } from "./fixtures/hookCaptureCapability";
+import { calls as llmCalls } from "./fixtures/mockLlmCapture";
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -31,6 +33,10 @@ const noAsk = async (_r: AskQuestionRequest): Promise<AskQuestionResponse> => ({
 let workDir: string;
 beforeEach(async () => {
   workDir = await mkdtemp(join(tmpdir(), "helios-test-"));
+  hookCalls.length = 0;
+  hookBehavior.userPromptSubmit = undefined;
+  hookBehavior.sessionStart = undefined;
+  llmCalls.length = 0;
   return async () => {
     await rm(workDir, { recursive: true, force: true });
   };
@@ -192,5 +198,151 @@ describe("PluginLoader —— 版本与 shape 校验", () => {
     const kernel = new Kernel({ workDir, manifest, logger: cap.logger });
     await kernel.start();
     expect(cap.errors.some((e) => /重复声明/.test(e))).toBe(true);
+  });
+});
+
+async function bootHookCaptureSession() {
+  const manifest: Manifest = {
+    plugins: [
+      { port: "FileSystemPort", package: "@helios/fs-node" },
+      { port: "CapabilityProvider", package: fixture("hookCaptureCapability.ts") },
+      { port: "LLMProvider", package: fixture("mockLlmCapture.ts") },
+    ],
+  };
+  const { logger } = capturingLogger();
+  const kernel = new Kernel({ workDir, manifest, logger });
+  await kernel.start();
+  const session = kernel.createSession({ askQuestion: noAsk });
+  return { kernel, session };
+}
+
+describe("UserPromptSubmit —— 循环触发点", () => {
+  it("block 时短路返回，不进入 turn 循环", async () => {
+    hookBehavior.userPromptSubmit = () => ({ block: true, reason: "denied" });
+    const { session } = await bootHookCaptureSession();
+
+    const events: AgentEvent[] = [];
+    session.on((e) => events.push(e));
+    const newMessages = await session.sendMessage("hi");
+
+    expect(newMessages).toHaveLength(1);
+    expect(newMessages[0]!.role).toBe("system");
+    expect(newMessages[0]!.content).toBe("denied");
+    expect(events.some((e) => e.type === "turn_start")).toBe(false);
+    expect(llmCalls).toHaveLength(0); // 从未进入 LLM 调用
+  });
+
+  it("改写 text 与 additionalContext：进入循环的 user 消息已被改写/追加", async () => {
+    hookBehavior.userPromptSubmit = () => ({ text: "改写后的文本", additionalContext: "extra-ctx" });
+    const { session } = await bootHookCaptureSession();
+
+    await session.sendMessage("原始文本");
+
+    const userMsg = session.getHistory().find((m: Message) => m.role === "user")!;
+    expect(userMsg.content).toContain("改写后的文本");
+    expect(userMsg.content).toContain("extra-ctx");
+    expect(userMsg.content).not.toContain("原始文本");
+  });
+});
+
+describe("SessionStart —— 懒触发 + 冻结注入", () => {
+  it("仅首次 sendMessage() 触发一次；resumed 反映 restore() 结果", async () => {
+    const { session } = await bootHookCaptureSession();
+
+    await session.sendMessage("第一条");
+    await session.sendMessage("第二条");
+
+    const starts = hookCalls.filter((c) => c.event === "SessionStart");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.payload).toMatchObject({ sessionId: session.id, resumed: false });
+  });
+
+  it("resumeSession 恢复历史会话时 resumed === true", async () => {
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("hookCaptureCapability.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmCapture.ts") },
+      ],
+    };
+    const { logger } = capturingLogger();
+    const kernel = new Kernel({ workDir, manifest, logger });
+    await kernel.start();
+    const first = kernel.createSession({ askQuestion: noAsk });
+    await first.sendMessage("hi"); // 落盘 turns.jsonl，供 resume 命中
+
+    hookCalls.length = 0;
+    const resumed = await kernel.resumeSession(first.id, { askQuestion: noAsk });
+    await resumed.sendMessage("继续");
+
+    const starts = hookCalls.filter((c) => c.event === "SessionStart");
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.payload).toMatchObject({ resumed: true });
+  });
+
+  it("additionalContext 折入冻结的 systemPrefix，仅计算一次", async () => {
+    hookBehavior.sessionStart = () => ({ additionalContext: "sess-ctx" });
+    const { session } = await bootHookCaptureSession();
+
+    await session.sendMessage("第一条");
+    await session.sendMessage("第二条");
+
+    expect(llmCalls).toHaveLength(2);
+    expect(llmCalls[0]!.opts.system).toContain("sess-ctx");
+    expect(llmCalls[1]!.opts.system).toBe(llmCalls[0]!.opts.system); // 冻结，第二次不重算
+  });
+});
+
+describe("SessionEnd —— dispose() 通知", () => {
+  it("调用 dispose() 后 SessionEnd handler 被触发一次，payload 携带正确 sessionId/workDir", async () => {
+    const { session } = await bootHookCaptureSession();
+    await session.dispose();
+
+    const ends = hookCalls.filter((c) => c.event === "SessionEnd");
+    expect(ends).toHaveLength(1);
+    expect(ends[0]!.payload).toMatchObject({ sessionId: session.id, workDir });
+  });
+});
+
+describe("HookConfigLoader —— 装配到 Kernel.start()", () => {
+  it("<workDir>/.helios/hooks.json 里的 PreToolUse 配置能真正拒绝工具调用", async () => {
+    await mkdir(join(workDir, ".helios"), { recursive: true });
+    await writeFile(
+      join(workDir, ".helios", "hooks.json"),
+      JSON.stringify({
+        hooks: [
+          {
+            event: "PreToolUse",
+            matcher: "mock__echo",
+            command: `node -e "process.stdout.write(JSON.stringify({decision:'deny',reason:'blocked-by-config'}))"`,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("mockCapability.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmWithTool.ts") },
+      ],
+    };
+    const { logger } = capturingLogger();
+    const kernel = new Kernel({ workDir, manifest, logger });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    const events: AgentEvent[] = [];
+    session.on((e) => events.push(e));
+    await session.sendMessage("go");
+
+    const toolEnd = events.find((e) => e.type === "tool_execution_end");
+    expect(toolEnd).toMatchObject({ isError: true });
+    expect((toolEnd as { output: string }).output).toContain("blocked-by-config");
+  });
+
+  it("无 hooks.json 时 start() 正常完成，行为不受影响", async () => {
+    const { session } = await bootHookCaptureSession();
+    expect(await session.sendMessage("hi")).toHaveLength(2);
   });
 });

@@ -97,3 +97,69 @@ describe("HookRunner —— PostToolUse 输出改写", () => {
     expect(d.block).toBe(true);
   });
 });
+
+describe("HookRunner —— UserPromptSubmit 合并", () => {
+  it("任一 block → block；text 取最后一个非 undefined；additionalContext 拼接", async () => {
+    const r = new HookRunner();
+    r.register([
+      { event: "UserPromptSubmit", handler: () => ({ text: "改写1", additionalContext: "ctx-A" }) },
+      { event: "UserPromptSubmit", handler: () => ({ block: true, reason: "拒绝" }) },
+      { event: "UserPromptSubmit", handler: () => ({ additionalContext: "ctx-B" }) },
+    ]);
+    const d = await r.runUserPromptSubmit({ text: "原文" });
+    expect(d.block).toBe(true);
+    expect(d.reason).toBe("拒绝");
+    expect(d.text).toBe("改写1"); // 后续 handler 未改写 text，保留最后一个非 undefined
+    expect(d.additionalContext).toBe("ctx-A\nctx-B");
+  });
+
+  it("无 handler 时原样返回 payload.text，additionalContext 为 undefined", async () => {
+    const r = new HookRunner();
+    const d = await r.runUserPromptSubmit({ text: "原文" });
+    expect(d.block).toBe(false);
+    expect(d.text).toBe("原文");
+    expect(d.additionalContext).toBeUndefined();
+  });
+});
+
+describe("HookRunner —— SessionStart 合并", () => {
+  it("多 handler 的 additionalContext 拼接", async () => {
+    const r = new HookRunner();
+    r.register([
+      { event: "SessionStart", handler: () => ({ additionalContext: "A" }) },
+      { event: "SessionStart", handler: () => undefined },
+      { event: "SessionStart", handler: () => ({ additionalContext: "B" }) },
+    ]);
+    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", resumed: false });
+    expect(d.additionalContext).toBe("A\nB");
+  });
+
+  it("无 handler 时返回 undefined", async () => {
+    const r = new HookRunner();
+    const d = await r.runSessionStart({ sessionId: "s1", workDir: "/tmp", resumed: false });
+    expect(d.additionalContext).toBeUndefined();
+  });
+});
+
+describe("HookRunner —— SessionEnd 通知", () => {
+  it("多 handler 全部执行；一个抛错不影响其它 handler（allSettled）", async () => {
+    const r = new HookRunner();
+    const calls: string[] = [];
+    r.register([
+      {
+        event: "SessionEnd",
+        handler: () => {
+          throw new Error("boom");
+        },
+      },
+      {
+        event: "SessionEnd",
+        handler: () => {
+          calls.push("second");
+        },
+      },
+    ]);
+    await r.runSessionEnd({ sessionId: "s1", workDir: "/tmp" });
+    expect(calls).toEqual(["second"]);
+  });
+});
