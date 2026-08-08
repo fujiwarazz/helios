@@ -92,6 +92,8 @@ const bashTool: Tool = {
     },
     required: ["command"],
   },
+  requiredPorts: [], // 只用 ctx.workDir/ctx.signal，不碰任何 Port
+
   async execute(input, ctx: ToolContext) {
     const { command, timeout } = input as { command: string; timeout?: number };
     // timeout 缺省或 <=0（含 0 会被 execa 解读为"永不超时"）时回落默认值，再夹到硬上限。
@@ -121,6 +123,7 @@ const readTool: Tool = {
     properties: { file_path: { type: "string" } },
     required: ["file_path"],
   },
+  requiredPorts: ["fileSystem"],
   async execute(input, ctx: ToolContext) {
     const { file_path } = input as { file_path: string };
     const content = await ctx.ports.fileSystem.readFile(file_path);
@@ -140,6 +143,7 @@ const writeTool: Tool = {
     properties: { file_path: { type: "string" }, content: { type: "string" } },
     required: ["file_path", "content"],
   },
+  requiredPorts: ["fileSystem"],
   async execute(input, ctx: ToolContext) {
     const { file_path, content } = input as { file_path: string; content: string };
     await ctx.ports.fileSystem.writeFile(file_path, content);
@@ -160,6 +164,7 @@ const editTool: Tool = {
     },
     required: ["file_path", "old_string", "new_string"],
   },
+  requiredPorts: ["fileSystem"],
   async execute(input, ctx: ToolContext) {
     const { file_path, old_string, new_string, replace_all } = input as {
       file_path: string;
@@ -191,6 +196,7 @@ const globTool: Tool = {
     properties: { pattern: { type: "string" } },
     required: ["pattern"],
   },
+  requiredPorts: ["fileSystem"],
   async execute(input, ctx: ToolContext) {
     const { pattern } = input as { pattern: string };
     const files = await ctx.ports.fileSystem.glob(pattern);
@@ -210,6 +216,7 @@ const grepTool: Tool = {
     },
     required: ["pattern"],
   },
+  requiredPorts: ["fileSystem"],
   async execute(input, ctx: ToolContext) {
     const { pattern, glob, ignore_case } = input as {
       pattern: string;
@@ -251,6 +258,7 @@ const webFetchTool: Tool = {
     properties: { url: { type: "string" } },
     required: ["url"],
   },
+  requiredPorts: [], // 纯 fetch，不碰任何 Port
   async execute(input, ctx: ToolContext) {
     const { url } = input as { url: string };
     try {
@@ -293,6 +301,7 @@ const askQuestionTool: Tool = {
     },
     required: ["question"],
   },
+  requiredPorts: [], // 用 ctx.askQuestion，不碰任何 Port
   async execute(input, ctx: ToolContext) {
     const { question, options } = input as {
       question: string;
@@ -314,6 +323,7 @@ const taskTool: Tool = {
     },
     required: ["description"],
   },
+  requiredPorts: ["multiAgent"],
   async execute(input, ctx: ToolContext) {
     const { name, description } = input as { name?: string; description: string };
     const agentName = name ?? "teammate";

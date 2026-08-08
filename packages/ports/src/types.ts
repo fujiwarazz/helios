@@ -76,10 +76,18 @@ export interface AskQuestionResponse {
   answers: string[];
 }
 
+/** Port 注册表里的字段名，用于工具按需声明依赖（接口隔离）。 */
+export type PortName = keyof PortRegistry;
+
 /** 工具执行时可用的运行时上下文（区别于插件装配期的 KernelContext） */
 export interface ToolContext {
   workDir: string;
   logger: Logger;
+  /**
+   * 按工具 `requiredPorts` 声明裁剪后的 Port 集合（接口隔离）：未声明的 Port 类型上仍是
+   * `PortRegistry` 的形状，但运行时访问会抛错——工具不该拿到自己没申报要用的能力。
+   * 未声明 `requiredPorts`（如 CapabilityProvider 自带的工具）视为兼容旧行为，给全量。
+   */
   ports: PortRegistry;
   signal?: AbortSignal;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
@@ -95,6 +103,12 @@ export interface Tool {
    * tool_use 中有任一工具非 parallel，整批退化为顺序执行（详见 executeTools）。
    */
   executionMode?: "sequential" | "parallel";
+  /**
+   * 声明本工具运行时实际依赖哪些 Port；kernel 按此裁剪 `ctx.ports`，访问未声明的 Port 会
+   * 抛错而非静默拿到（接口隔离：不给工具超出自己声明范围的能力）。
+   * 缺省（undefined）= 不裁剪，给全量 `PortRegistry`（兼容未声明的旧工具/第三方工具）。
+   */
+  requiredPorts?: readonly PortName[];
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>;
 }
 

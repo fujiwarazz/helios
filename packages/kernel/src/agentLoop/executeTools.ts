@@ -4,6 +4,7 @@ import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
 import type { AgentEventEmitter, ToolResultRecord } from "../events";
 import type { ToolUseBlock } from "./types";
+import { scopePorts } from "./portScope";
 
 export interface ExecuteToolsParams {
   turnId: string;
@@ -114,8 +115,10 @@ async function runOneToolCall(
         output = `未找到工具：${block.name}`;
         isError = true;
       } else {
+        // 接口隔离：按工具声明的 requiredPorts 裁剪 ctx.ports，未声明的 Port 该工具碰不到。
+        const scopedCtx: ToolContext = { ...toolCtx, ports: scopePorts(toolCtx.ports, tool.requiredPorts) };
         try {
-          const res = await tool.execute(input, toolCtx);
+          const res = await tool.execute(input, scopedCtx);
           output = res.output;
           isError = !!res.isError;
         } catch (err) {
