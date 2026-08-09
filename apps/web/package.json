@@ -17,11 +17,13 @@
     "@helios/kernel": "workspace:*",
     "@helios/fs-node": "workspace:*",
     "@helios/llm-anthropic": "workspace:*",
+    "@helios/llm-openai": "workspace:*",
     "@helios/memory-fs": "workspace:*",
     "@helios/checkpoint-fs": "workspace:*",
     "@helios/compact-default": "workspace:*",
     "@helios/teams-mailbox": "workspace:*",
     "@helios/capability-fs": "workspace:*",
+    "@helios/costmeter-default": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

@@ -15,10 +15,12 @@
     "@helios/ports": "workspace:*",
     "@helios/fs-node": "workspace:*",
     "@helios/llm-anthropic": "workspace:*",
+    "@helios/llm-openai": "workspace:*",
     "@helios/memory-fs": "workspace:*",
     "@helios/checkpoint-fs": "workspace:*",
     "@helios/compact-default": "workspace:*",
     "@helios/teams-mailbox": "workspace:*",
-    "@helios/capability-fs": "workspace:*"
+    "@helios/capability-fs": "workspace:*",
+    "@helios/costmeter-default": "workspace:*"
   }
 }

@@ -8,7 +8,7 @@ import type { AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
 const DEFAULT_MANIFEST: Manifest = {
   plugins: [
     { port: "FileSystemPort", package: "@helios/fs-node" },
-    { port: "LLMProvider", package: "@helios/llm-anthropic", options: {} },
+    { port: "LLMProvider", package: "@helios/llm-openai", options: {} },
   ],
 };
 
@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   const kernel = new Kernel({
     workDir,
     manifest,
-    llmOptions: { provider: "anthropic" },
+    llmOptions: { provider: "openai" },
     // 裸包名从 CLI 自身依赖解析（manifest 里的 @helios/* 是 CLI 的 workspace 依赖）。
     resolvePackage: (spec) => import.meta.resolve(spec),
   });

@@ -32,6 +32,9 @@ importers:
       '@helios/compact-default':
         specifier: workspace:*
         version: link:../../packages/compact-default
+      '@helios/costmeter-default':
+        specifier: workspace:*
+        version: link:../../packages/costmeter-default
       '@helios/fs-node':
         specifier: workspace:*
         version: link:../../packages/fs-node
@@ -41,6 +44,9 @@ importers:
       '@helios/llm-anthropic':
         specifier: workspace:*
         version: link:../../packages/llm-anthropic
+      '@helios/llm-openai':
+        specifier: workspace:*
+        version: link:../../packages/llm-openai
       '@helios/memory-fs':
         specifier: workspace:*
         version: link:../../packages/memory-fs
@@ -62,6 +68,9 @@ importers:
       '@helios/compact-default':
         specifier: workspace:*
         version: link:../../packages/compact-default
+      '@helios/costmeter-default':
+        specifier: workspace:*
+        version: link:../../packages/costmeter-default
       '@helios/fs-node':
         specifier: workspace:*
         version: link:../../packages/fs-node
@@ -74,6 +83,9 @@ importers:
       '@helios/llm-anthropic':
         specifier: workspace:*
         version: link:../../packages/llm-anthropic
+      '@helios/llm-openai':
+        specifier: workspace:*
+        version: link:../../packages/llm-openai
       '@helios/memory-fs':
         specifier: workspace:*
         version: link:../../packages/memory-fs

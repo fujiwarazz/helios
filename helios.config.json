@@ -8,12 +8,27 @@
     { "port": "MultiAgentPort", "package": "@helios/teams-mailbox" },
     { "port": "CapabilityProvider", "package": "@helios/capability-fs" },
     {
-      "port": "LLMProvider",
-      "package": "@helios/llm-anthropic",
+      "port": "CostMeterPort",
+      "package": "@helios/costmeter-default",
       "options": {
-        "baseURL": "http://127.0.0.1:8788",
-        "apiKey": "local",
-        "model": "Claude-4.8-opus"
+        "pricingVersion": "codexapis-2026-08",
+        "//pricing": "key 用 '*' 通配：当前 llmOptions 未显式传 model，CostMeter 记的 rec.model 会是空串，精确 key 匹配不到",
+        "pricing": {
+          "*": {
+            "uncachedInput": 0.075,
+            "cachedInput": 0.05,
+            "cacheWrite": 0.05,
+            "output": 0.45
+          }
+        }
+      }
+    },
+    {
+      "port": "LLMProvider",
+      "package": "@helios/llm-openai",
+      "options": {
+        "baseURL": "https://codexapis.com/v1",
+        "model": "gpt-5.4-mini"
       }
     }
   ]
