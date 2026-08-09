@@ -39,3 +39,6 @@ export {
 } from "./builtin/tools";
 export type { AgentEvent, AgentEventListener, ToolResultRecord } from "./events";
 export { uid } from "./ids";
+export { LlmProviderError, normalizeLlmError } from "./errors";
+export { DEFAULT_LLM_RETRY, computeRetryDelayMs, realSleep } from "./agentLoop/retryBackoff";
+export type { LlmRetryOptions } from "./agentLoop/retryBackoff";

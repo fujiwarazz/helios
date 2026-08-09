@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { APIError, APIUserAbortError } from "openai";
 import type {
   LLMProvider,
   KernelContext,
@@ -7,9 +7,17 @@ import type {
   LLMOptions,
   StreamEvent,
 } from "@helios/ports";
-import { LLM_PROVIDER_API_VERSION } from "@helios/ports";
+import { LLM_PROVIDER_API_VERSION, isRetryableHttpStatus } from "@helios/ports";
 import { toOpenAIMessages, toOpenAITools } from "./convert";
 import { mapOpenAIStream, type OpenAIChunk } from "./stream";
+
+/** 从 SDK 错误的 `Retry-After` 响应头解析毫秒数；解析失败/不存在返回 undefined。 */
+function extractRetryAfterMs(err: APIError): number | undefined {
+  const raw = err.headers?.["retry-after"];
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+}
 
 const DEFAULT_MODEL = "gpt-4o";
 
@@ -42,20 +50,34 @@ class OpenAIProvider implements LLMProvider {
     tools: Tool[],
     opts: LLMOptions,
   ): AsyncGenerator<StreamEvent> {
-    const stream = await this.client.chat.completions.create(
-      {
-        model: opts.model ?? this.defaultModel,
-        max_tokens: opts.maxTokens ?? 4096,
-        temperature: opts.temperature,
-        messages: toOpenAIMessages(messages, opts.system),
-        tools: tools.length ? toOpenAITools(tools) : undefined,
-        stream: true,
-        // 让末尾 chunk 携带 usage，供 CostMeter 计量。
-        stream_options: { include_usage: true },
-      },
-      { signal: opts.signal },
-    );
-    yield* mapOpenAIStream(stream as AsyncIterable<OpenAIChunk>);
+    try {
+      const stream = await this.client.chat.completions.create(
+        {
+          model: opts.model ?? this.defaultModel,
+          max_tokens: opts.maxTokens ?? 4096,
+          temperature: opts.temperature,
+          messages: toOpenAIMessages(messages, opts.system),
+          tools: tools.length ? toOpenAITools(tools) : undefined,
+          stream: true,
+          // 让末尾 chunk 携带 usage，供 CostMeter 计量。
+          stream_options: { include_usage: true },
+        },
+        { signal: opts.signal },
+      );
+      yield* mapOpenAIStream(stream as AsyncIterable<OpenAIChunk>);
+    } catch (err) {
+      // 预期错误（SDK APIError：429/5xx/401/网络类）转成 Result 通道；非预期错误（我们自己代码的
+      // bug）原样穿透，不吞。
+      if (!(err instanceof APIError)) throw err;
+      const isAbort = err instanceof APIUserAbortError;
+      yield {
+        type: "error",
+        error: err.message,
+        retryable: isAbort ? false : isRetryableHttpStatus(err.status),
+        httpStatus: err.status,
+        retryAfterMs: isAbort ? undefined : extractRetryAfterMs(err),
+      };
+    }
   }
 }
 

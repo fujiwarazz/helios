@@ -16,6 +16,7 @@ import { loadPlugins, type Manifest, type PackageResolver } from "./pluginLoader
 import { builtinCapabilityProvider } from "./builtin/provider";
 import { Session, type SessionMeta } from "./session";
 import { uid } from "./ids";
+import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -44,6 +45,10 @@ export interface KernelOptions {
 export interface CreateSessionOptions {
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
   maxTurns?: number;
+  /** LLM 调用重试策略覆盖；缺省用 DEFAULT_LLM_RETRY（issue #10）。 */
+  llmRetry?: LlmRetryOptions;
+  /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待。 */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class Kernel {
@@ -148,6 +153,8 @@ export class Kernel {
       system: this.opts.system ?? DEFAULT_SYSTEM,
       askQuestion: opts.askQuestion,
       maxTurns: opts.maxTurns,
+      llmRetry: opts.llmRetry,
+      sleep: opts.sleep,
     });
   }
 

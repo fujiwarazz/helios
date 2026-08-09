@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger, AskQuestionRequest, AskQuestionResponse, Message } from "@helios/ports";
-import { Kernel, type Manifest } from "../src/index";
+import { Kernel, type Manifest, LlmProviderError } from "../src/index";
 import type { AgentEvent } from "../src/events";
+import type { LlmRetryOptions } from "../src/agentLoop/retryBackoff";
 import { callLog as parallelCallLog } from "./fixtures/mockCapabilityParallel";
 
 function fixture(name: string): string {
@@ -29,7 +30,12 @@ beforeEach(async () => {
   };
 });
 
-async function bootSession(llmFixture: string, extraPlugins: Manifest["plugins"] = [], maxTurns?: number) {
+async function bootSession(
+  llmFixture: string,
+  extraPlugins: Manifest["plugins"] = [],
+  maxTurns?: number,
+  sessionOpts: { llmRetry?: LlmRetryOptions; sleep?: (ms: number) => Promise<void> } = {},
+) {
   const manifest: Manifest = {
     plugins: [
       { port: "FileSystemPort", package: "@helios/fs-node" },
@@ -40,7 +46,7 @@ async function bootSession(llmFixture: string, extraPlugins: Manifest["plugins"]
   const kernel = new Kernel({ workDir, manifest, logger: silentLogger });
   await kernel.start();
   const events: AgentEvent[] = [];
-  const session = kernel.createSession({ askQuestion: noAsk, maxTurns });
+  const session = kernel.createSession({ askQuestion: noAsk, maxTurns, ...sessionOpts });
   session.on((e) => events.push(e));
   return { session, events };
 }
@@ -163,5 +169,95 @@ describe("Bug 7 —— 空 assistant 消息不入历史", () => {
     expect(newMessages.every((m: Message) => !(m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0))).toBe(true);
     const history = session.getHistory();
     expect(history.some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0)).toBe(false);
+  });
+});
+
+describe("issue #10 —— LLM 错误分层重试 harness", () => {
+  it("前 2 次可重试错误，第 3 次成功：最终成功，llm_retry 事件出现 2 次且 retryCount 递增，sleep 被调用但不真实等待", async () => {
+    const sleepCalls: number[] = [];
+    const { session, events } = await bootSession("mockLlmRetryable.ts", [], undefined, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+    });
+
+    await session.sendMessage("hi");
+
+    const retryEvents = events.filter((e) => e.type === "llm_retry");
+    expect(retryEvents).toHaveLength(2);
+    expect(retryEvents.map((e) => (e as { retryCount: number }).retryCount)).toEqual([1, 2]);
+    expect(sleepCalls).toHaveLength(2);
+
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "agent_end", error: undefined });
+    const history = session.getHistory();
+    const assistant = history.find((m: Message) => m.role === "assistant");
+    expect(JSON.stringify(assistant?.content ?? "")).toContain("重试后成功");
+  });
+
+  it("一直可重试错误：重试耗尽（默认 maxRetries=3）后落到 agent_end.error 优雅结束路径", async () => {
+    const sleepCalls: number[] = [];
+    const { session, events } = await bootSession("mockLlmExhaustRetries.ts", [], undefined, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+    });
+
+    await expect(session.sendMessage("hi")).resolves.toBeDefined();
+
+    expect(sleepCalls).toHaveLength(3); // 默认 maxRetries=3，耗尽后不再重试
+    const retryEvents = events.filter((e) => e.type === "llm_retry");
+    expect(retryEvents).toHaveLength(3);
+
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "agent_end", error: "服务暂不可用" });
+  });
+
+  it("Retry-After 超过 maxDelayMs 上限：不重试，直接判定失败，sleep 从未被调用", async () => {
+    const sleepCalls: number[] = [];
+    const { session, events } = await bootSession("mockLlmHugeRetryAfter.ts", [], undefined, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+    });
+
+    await expect(session.sendMessage("hi")).resolves.toBeDefined();
+
+    expect(sleepCalls).toHaveLength(0);
+    expect(events.some((e) => e.type === "llm_retry")).toBe(false);
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "agent_end", error: "限流" });
+  });
+
+  it("既有 mockLlmStreamError（未设置 retryable）零改动通过：默认不重试的向后兼容承诺", async () => {
+    const sleepCalls: number[] = [];
+    const { session, events } = await bootSession("mockLlmStreamError.ts", [], undefined, {
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+    });
+
+    await expect(session.sendMessage("hi")).resolves.toBeDefined();
+
+    expect(sleepCalls).toHaveLength(0);
+    expect(events.some((e) => e.type === "llm_retry")).toBe(false);
+    const last = events[events.length - 1];
+    expect(last).toMatchObject({ type: "agent_end", error: "网络超时" });
+  });
+
+  it("provider 内部抛非预期异常（非 SDK APIError）：session.sendMessage() reject，且是归一化的 LlmProviderError，cause 保留原始异常", async () => {
+    const { session } = await bootSession("mockLlmUnexpectedThrow.ts");
+
+    let caught: unknown;
+    try {
+      await session.sendMessage("hi");
+      expect.unreachable();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(LlmProviderError);
+    const llmErr = caught as LlmProviderError;
+    expect(llmErr.cause).toBeInstanceOf(TypeError);
+    expect((llmErr.cause as TypeError).message).toBe("provider 内部 bug");
   });
 });

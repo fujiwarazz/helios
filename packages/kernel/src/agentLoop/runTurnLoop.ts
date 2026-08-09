@@ -5,6 +5,8 @@ import { executeTools } from "./executeTools";
 import type { RunLoopDeps, SessionTreeCallbacks, ToolUseBlock } from "./types";
 import type { ToolResultRecord } from "../events";
 import { approxTokens, pathHasCode, stableStringify } from "./canonical";
+import { computeRetryDelayMs, realSleep, DEFAULT_LLM_RETRY } from "./retryBackoff";
+import { normalizeLlmError } from "../errors";
 
 export interface RunTurnLoopParams {
   /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
@@ -45,6 +47,8 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
   const { deps, tree, turnIdPrefix, runId, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
   const { provider, toolRegistry, hooks, sessionId, workDir, logger, askQuestion, signal, events } = deps;
   const { modelRouter, costMeter, toolCache, versionProvider, llmRegistry } = deps;
+  const retryOpts = deps.llmRetry ?? DEFAULT_LLM_RETRY;
+  const sleep = deps.sleep ?? realSleep;
 
   const turnIds: string[] = [];
   let turnIndex = 0;
@@ -60,7 +64,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     lastToolSignature: null as string | null,
   };
 
-  while (turnIndex < maxTurns) {
+  turnLoop: while (turnIndex < maxTurns) {
     if (signal.aborted) break; // 已中断：不再开新 turn
 
     // 扩展点：非首轮时尝试 drain 中途插话消息，前置注入本轮 lead messages。默认不传，无行为变化。
@@ -98,25 +102,44 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       }
     }
 
-    let streamed: Awaited<ReturnType<typeof streamAssistant>>;
-    try {
-      streamed = await streamAssistant({
-        provider: usedProvider,
-        messages: path,
-        tools: toolRegistry.list(),
-        llmOptions: effective,
-        system,
-        signal,
+    let streamed: Awaited<ReturnType<typeof streamAssistant>> | undefined;
+    let retryCount = 0;
+    while (true) {
+      try {
+        streamed = await streamAssistant({
+          provider: usedProvider,
+          messages: path,
+          tools: toolRegistry.list(),
+          llmOptions: effective,
+          system,
+          signal,
+          turnId,
+          logger,
+          events,
+        });
+      } catch (err) {
+        // 中断导致的流异常（AbortError）视为正常停止，不向上抛，直接结束整个 run（与改造前一致）。
+        if (signal.aborted) break turnLoop;
+        // 非预期错误（非 SDK APIError）：归一化成单一类型再穿透，不裸抛底层 SDK/内部异常。
+        throw normalizeLlmError(err);
+      }
+      if (!streamed.streamError) break; // 成功，跳出重试循环
+      if (signal.aborted) break turnLoop; // 中断视为正常停止，不重试、不计错误、不落 runError（保留现状语义）
+      const canRetry = streamed.streamErrorMeta?.retryable === true && retryCount < retryOpts.maxRetries;
+      if (!canRetry) break; // 致命错误 or 重试耗尽 → 落到下方"优雅结束"路径（Result 通道，不 throw）
+      const delayMs = computeRetryDelayMs(retryCount, retryOpts, streamed.streamErrorMeta?.retryAfterMs);
+      if (delayMs === undefined) break; // Retry-After 超过 maxDelayMs 上限：判定不值得等，直接走 fatal 路径
+      events.emit({
+        type: "llm_retry",
         turnId,
-        logger,
-        events,
+        retryCount: retryCount + 1,
+        delayMs,
+        httpStatus: streamed.streamErrorMeta?.httpStatus,
       });
-    } catch (err) {
-      // 中断导致的流异常（AbortError）视为正常停止，不向上抛
-      if (signal.aborted) break;
-      throw err;
+      await sleep(delayMs);
+      retryCount++;
     }
-    const { assistantMsg, toolUseBlocks, streamError, parseErrorIds, usage } = streamed;
+    const { assistantMsg, stopReason, toolUseBlocks, streamError, parseErrorIds, usage } = streamed;
     assistantMsg.turnId = turnId;
 
     // CostMeter 计量（旁路观察）：有 usage 才记，noop 时为空操作。
@@ -148,7 +171,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       break;
     }
 
-    if (toolUseBlocks.length > 0) {
+    if (stopReason === "tool_use") {
       const toolCtx = { workDir, logger, askQuestion, signal };
       const { toolResultMsg, records } = await executeTools({
         turnId,
