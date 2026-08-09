@@ -8,8 +8,11 @@ import type { IChatClient, ConnectionState } from "./types";
 
 afterEach(cleanup);
 
-/** 可手动 emit 事件 / 切状态的 mock client。 */
-function makeMockClient(history: Message[] = []): {
+/** 可手动 emit 事件 / 切状态的 mock client。sendMessageImpl 默认只记录发送文本,可注入抛错行为。 */
+function makeMockClient(
+  history: Message[] = [],
+  sendMessageImpl?: (t: string) => Promise<void>,
+): {
   client: IChatClient;
   emit: (e: AgentEvent) => void;
   setState: (s: ConnectionState) => void;
@@ -20,9 +23,11 @@ function makeMockClient(history: Message[] = []): {
   const sent: string[] = [];
   const client: IChatClient = {
     getHistory: async () => history,
-    sendMessage: async (t) => {
-      sent.push(t);
-    },
+    sendMessage:
+      sendMessageImpl ??
+      (async (t) => {
+        sent.push(t);
+      }),
     onEvent: (cb) => (eventCbs.add(cb), () => eventCbs.delete(cb)),
     onState: (cb) => (stateCbs.add(cb), () => stateCbs.delete(cb)),
   };
@@ -75,6 +80,21 @@ describe("useChat", () => {
     expect(result.current.connection).toBe("connecting");
     act(() => setState("closed"));
     expect(result.current.connection).toBe("closed");
+  });
+
+  it("sendMessage 抛错 → 追加系统错误消息 + isStreaming 复位", async () => {
+    const { client } = makeMockClient([], async () => {
+      throw new Error("402 quota exceeded for user");
+    });
+    const { result } = renderHook(() => useChat(client));
+
+    await act(async () => {
+      await result.current.send("hi");
+    });
+
+    expect(result.current.isStreaming).toBe(false);
+    const errMsg = result.current.messages.find((m) => m.role === "system");
+    expect(errMsg?.text).toBe("402 quota exceeded for user");
   });
 
   it("挂载拉历史 → 重建视图", async () => {
@@ -146,5 +166,20 @@ describe("reduce —— 幂等 / 容忍乱序 / 重复", () => {
     const m = s.messages.find((x) => x.id === "m1")!;
     expect(m.thinking).toBe("先想想…再想想。");
     expect(m.text).toBe("答案是 42");
+  });
+
+  it("agent_end.error → 追加一条系统错误消息,幂等不重复", () => {
+    const errEnd: AgentEvent = {
+      type: "agent_end",
+      runId: "r1",
+      turnIds: [TURN],
+      newMessages: [],
+      error: "402 quota exceeded for user",
+    };
+    const s = apply([msgStart, delta("hi"), errEnd, errEnd]);
+    const errMsgs = s.messages.filter((m) => m.role === "system");
+    expect(errMsgs).toHaveLength(1);
+    expect(errMsgs[0].text).toBe("402 quota exceeded for user");
+    expect(s.isStreaming).toBe(false);
   });
 });

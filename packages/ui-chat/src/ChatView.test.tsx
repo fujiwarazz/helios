@@ -171,4 +171,28 @@ describe("ChatView", () => {
     });
     expect(answered).toEqual([{ questionId: "q2", answers: ["A", "C"] }]);
   });
+
+  it("sendMessage 抛错 → 界面显示错误文案,且发送框恢复可用(不卡在停止态)", async () => {
+    const client: IChatClient = {
+      getHistory: async (): Promise<Message[]> => [],
+      sendMessage: async () => {
+        throw new Error("402 quota exceeded for user");
+      },
+      onEvent: () => () => {},
+    };
+    render(<ChatView client={client} />);
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "hi" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+    expect(screen.getByText("402 quota exceeded for user")).toBeTruthy();
+    expect(screen.queryByTestId("stop-button")).toBeNull(); // 没卡在"流式中"态
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "再试一次" } });
+    });
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(false); // 发送框恢复可用
+  });
 });

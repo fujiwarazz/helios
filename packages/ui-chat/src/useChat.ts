@@ -55,6 +55,19 @@ function lastAssistant(messages: ChatMessageView[]): ChatMessageView | undefined
 }
 
 /**
+ * 幂等地追加一条系统消息（用于展示 run 失败/发送失败的错误文案）。
+ * id 已存在则原样返回，避免重复插入。
+ */
+function appendErrorMessage(
+  messages: ChatMessageView[],
+  id: string,
+  text: string,
+): ChatMessageView[] {
+  if (messages.some((m) => m.id === id)) return messages;
+  return [...messages, { id, role: "system", text, tools: [] }];
+}
+
+/**
  * 纯 reducer:输入旧 state + 一个事件,返回新 state(不可变更新)。
  * 幂等:重复 message_start / 重复 tool 事件都不会产生重复条目。
  */
@@ -185,10 +198,16 @@ export function reduce(
       // 重新 getHistory() 重建——历史是权威。这里仅结束流式态。
       return { ...state, isStreaming: false };
 
-    case "agent_end":
+    case "agent_end": {
       // 一个 run（一次用户输入 → 多个 turn）结束：按 run 粒度重标回溯入口
       // （只在每个 run 最后一条 assistant 消息上，回溯目标 = 该 run 第一个 turn）。
-      return { ...state, messages: markRunBoundaries(state.messages), isStreaming: false };
+      // run 因错误优雅收尾（如 LLM 配额超限/不可重试错误）时，追加一条可见的系统提示，
+      // 否则错误只留在 host 日志里，前端会像"悄悄卡住"一样毫无提示。
+      const messages = event.error
+        ? appendErrorMessage(state.messages, `error-${event.runId}`, event.error)
+        : state.messages;
+      return { ...state, messages: markRunBoundaries(messages), isStreaming: false };
+    }
 
     default:
       return state;
@@ -348,7 +367,18 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     async (text: string) => {
       const t = text.trim();
       if (!t) return;
-      await client.sendMessage(t);
+      try {
+        await client.sendMessage(t);
+      } catch (err) {
+        // sendMessage() 在 run 未优雅收尾前意外 throw（如非预期异常/连接中断）：
+        // 没有 agent_end 事件会来，isStreaming 会永久卡在 true，这里强制复位并给出提示。
+        const message = err instanceof Error ? err.message : String(err);
+        setState((s) => ({
+          ...s,
+          isStreaming: false,
+          messages: appendErrorMessage(s.messages, `error-send-${Date.now()}`, message),
+        }));
+      }
     },
     [client],
   );

@@ -56,6 +56,21 @@
 .helios-msg-assistant .helios-msg-text {
   color: var(--h-text);
 }
+.helios-msg-system {
+  display: flex;
+  justify-content: center;
+}
+.helios-msg-system .helios-msg-text {
+  background: var(--h-error-weak);
+  color: var(--h-error);
+  border: 1px solid var(--h-error);
+  border-radius: var(--h-radius-md);
+  padding: var(--h-space-2) var(--h-space-4);
+  font-size: var(--h-fs-sm);
+  max-width: 90%;
+  text-align: center;
+  white-space: pre-wrap;
+}
 /* 流式中的纯文本:保留换行/空白,视觉与 markdown 段落一致(未解析但不塌行) */
 .helios-stream-text {
   white-space: pre-wrap;
