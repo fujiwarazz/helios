@@ -16,6 +16,7 @@ import type { AgentEvent, AgentEventListener } from "./events";
 import { snapCompactionCut, reconstructPath, type CompactionRecord } from "./messageTree";
 import { runTurnLoop } from "./agentLoop/runTurnLoop";
 import type { TurnRecord } from "./agentLoop/types";
+import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
 
 /** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
 interface PersistedCompaction {
@@ -38,6 +39,10 @@ export interface SessionOptions {
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
   /** 单次 run 内最大 turn 数，防失控 */
   maxTurns?: number;
+  /** LLM 调用重试策略覆盖；缺省用 DEFAULT_LLM_RETRY（issue #10）。 */
+  llmRetry?: LlmRetryOptions;
+  /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待。 */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** 会话元数据，落 `<workDir>/.helios/sessions/<id>/meta.json`，供列表展示与 resume。 */
@@ -293,6 +298,8 @@ export class Session {
         toolCache: ports.toolCache,
         versionProvider: ports.versionProvider,
         llmRegistry: ports.llm,
+        llmRetry: this.opts.llmRetry,
+        sleep: this.opts.sleep,
       },
       tree: {
         appendNode: (msg) => this.appendNode(msg),

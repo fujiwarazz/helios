@@ -151,7 +151,14 @@ export type StreamEvent =
   | { type: "tool-call-end"; id: string }
   /** 结束事件；usage 由 provider 归一化后携带，CostMeter 据此计量（缺省则无计量）。 */
   | { type: "message-stop"; stopReason: StopReason; usage?: Usage }
-  | { type: "error"; error: string };
+  /**
+   * LLMProvider 只在捕获到 SDK 的 APIError（及其子类，涵盖 HTTP 状态码错误/连接类错误）时才产出
+   * 这个事件——是"预期错误"的 Result 通道；非 APIError 的异常（我们自己代码的 bug）不落这里，
+   * 原样 throw 穿透（见 runTurnLoop.ts 的 normalizeLlmError）。
+   * `retryable`/`httpStatus`/`retryAfterMs` 由各 provider 按 SDK 错误对象填充；`code` 预留给后续
+   * 更细的错误语义分类（如 "rate_limited"/"overloaded"），本次两个 provider 都不填。
+   */
+  | { type: "error"; error: string; retryable?: boolean; httpStatus?: number; retryAfterMs?: number; code?: string };
 
 export interface LLMOptions {
   /** 选用哪个已注册的 provider（多实例 Port），缺省用第一个 */

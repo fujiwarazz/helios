@@ -15,6 +15,7 @@ import type {
 import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
 import type { AgentEventEmitter } from "../events";
+import type { LlmRetryOptions } from "./retryBackoff";
 
 /** tool_use 内容块的类型别名，供 streamAssistant/executeTools 共用，避免重复 Extract<...>。 */
 export type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
@@ -60,6 +61,10 @@ export interface RunLoopDeps {
   versionProvider: VersionProviderPort;
   /** 按 ModelRouter 决策 provider 解析实际 LLMProvider（跨 provider 切换时用）。 */
   llmRegistry: LLMRegistry;
+  /** LLM 调用重试策略；缺省用 {@link DEFAULT_LLM_RETRY}（issue #10）。 */
+  llmRetry?: LlmRetryOptions;
+  /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待；缺省用 {@link realSleep}。 */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**

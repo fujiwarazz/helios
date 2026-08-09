@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIError, APIUserAbortError } from "@anthropic-ai/sdk";
 import type {
   LLMProvider,
   KernelContext,
@@ -8,7 +8,7 @@ import type {
   StreamEvent,
   Usage,
 } from "@helios/ports";
-import { LLM_PROVIDER_API_VERSION } from "@helios/ports";
+import { LLM_PROVIDER_API_VERSION, isRetryableHttpStatus } from "@helios/ports";
 import {
   toAnthropicMessages,
   toAnthropicTools,
@@ -16,6 +16,14 @@ import {
   cachedSystem,
   applyCacheBreakpoints,
 } from "./convert";
+
+/** 从 SDK 错误的 `Retry-After` 响应头解析毫秒数；解析失败/不存在返回 undefined。 */
+function extractRetryAfterMs(err: APIError): number | undefined {
+  const raw = err.headers?.["retry-after"];
+  if (!raw) return undefined;
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+}
 
 const DEFAULT_MODEL = "claude-3-5-sonnet-latest";
 
@@ -69,11 +77,6 @@ class AnthropicProvider implements LLMProvider {
       stream: true as const,
       ...(thinking ? { thinking } : {}),
     };
-    const stream = await this.client.messages.create(
-      createParams as unknown as Anthropic.MessageCreateParamsStreaming,
-      { signal: opts.signal },
-    );
-
     // index → tool_use 的 block id，用于把 input_json_delta 归到正确的工具调用
     const indexToToolId = new Map<number, string>();
     let stopReason = "end_turn";
@@ -86,6 +89,10 @@ class AnthropicProvider implements LLMProvider {
     };
 
     try {
+      const stream = await this.client.messages.create(
+        createParams as unknown as Anthropic.MessageCreateParamsStreaming,
+        { signal: opts.signal },
+      );
       for await (const event of stream) {
         switch (event.type) {
           case "message_start": {
@@ -157,7 +164,17 @@ class AnthropicProvider implements LLMProvider {
       }
       yield { type: "message-stop", stopReason: mapStopReason(stopReason), usage };
     } catch (err) {
-      yield { type: "error", error: err instanceof Error ? err.message : String(err) };
+      // 预期错误（SDK APIError：429/5xx/401/网络类）转成 Result 通道；非预期错误（我们自己代码的
+      // bug）原样穿透，不吞。
+      if (!(err instanceof APIError)) throw err;
+      const isAbort = err instanceof APIUserAbortError;
+      yield {
+        type: "error",
+        error: err.message,
+        retryable: isAbort ? false : isRetryableHttpStatus(err.status),
+        httpStatus: err.status,
+        retryAfterMs: isAbort ? undefined : extractRetryAfterMs(err),
+      };
     }
   }
 }

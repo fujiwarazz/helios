@@ -22,6 +22,8 @@ export interface StreamAssistantResult {
   toolUseBlocks: ToolUseBlock[];
   /** LLM 流中途报错时的信息（Bug 3）；正常时 undefined。 */
   streamError?: string;
+  /** streamError 的结构化元信息（issue #10）：由 provider 在捕获 SDK APIError 时填充，供 runTurnLoop 分类重试。 */
+  streamErrorMeta?: { retryable?: boolean; httpStatus?: number; retryAfterMs?: number; code?: string };
   /** 参数 JSON 解析失败 / 因输出截断（max_tokens）而判失败的 tool_use id 集合，executeTools 据此回传错误。 */
   parseErrorIds: Set<string>;
   /** provider 归一化后的 token 用量（CostMeter 据此计量）；provider 未提供则 undefined。 */
@@ -38,6 +40,7 @@ interface StreamAccumulator {
   stopReason: StopReason;
   streamError?: string;
   usage?: Usage;
+  streamErrorMeta?: { retryable?: boolean; httpStatus?: number; retryAfterMs?: number; code?: string };
 }
 
 type StreamEventHandler<E extends StreamEvent = StreamEvent> = (acc: StreamAccumulator, ev: E, logger: Logger) => void;
@@ -73,6 +76,7 @@ const STREAM_EVENT_HANDLERS: { [K in StreamEvent["type"]]: StreamEventHandler<Ex
     // Bug 3：不再 throw 穿透整个 run，记录错误并中断流，交由调用方优雅收尾。
     logger.error(`LLM 流错误：${ev.error}`);
     acc.streamError = ev.error;
+    acc.streamErrorMeta = { retryable: ev.retryable, httpStatus: ev.httpStatus, retryAfterMs: ev.retryAfterMs, code: ev.code };
   },
 };
 
@@ -135,7 +139,15 @@ export async function streamAssistant(params: StreamAssistantParams): Promise<St
 
   const assistantMsg: Message = { id: messageId, role: "assistant", content };
   events.emit({ type: "message_end", messageId, role: "assistant", stopReason });
-  return { assistantMsg, stopReason, toolUseBlocks, streamError: acc.streamError, parseErrorIds, usage: acc.usage };
+  return {
+    assistantMsg,
+    stopReason,
+    toolUseBlocks,
+    streamError: acc.streamError,
+    streamErrorMeta: acc.streamErrorMeta,
+    parseErrorIds,
+    usage: acc.usage,
+  };
 }
 
 /**

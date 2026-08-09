@@ -10,6 +10,8 @@ export type AgentEvent =
   | { type: "tool_execution_start"; toolUseId: string; name: string; input: unknown }
   | { type: "tool_execution_end"; toolUseId: string; output: unknown; isError: boolean }
   | { type: "turn_end"; turnId: string; toolResults: ToolResultRecord[] }
+  /** LLM 调用命中可重试错误、即将 backoff 重试（issue #10）；供消费方感知"正在重试"、可选择丢弃上一次失败 attempt 的部分渲染。 */
+  | { type: "llm_retry"; turnId: string; retryCount: number; delayMs: number; httpStatus?: number }
   | { type: "compact_start"; messageCount: number }
   | { type: "compact_end"; summaryLength: number; remaining: number }
   | { type: "rollback"; turnId: string; historyLength: number }
