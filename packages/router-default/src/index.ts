@@ -37,6 +37,8 @@ interface RatchetState {
 type Tier = 0 | 1 | 2;
 
 class DefaultModelRouter implements ModelRouterPort {
+  // TODO(eviction): ratchet 按 sessionId 累积，每 run 覆盖但从不删除；进程内 session 多时缓慢增长。
+  // MVP 可接受；长生命周期宿主需加 LRU/TTL 或在 session 销毁时清理。
   private readonly ratchet = new Map<string, RatchetState>();
   private readonly auxPurposes: Set<string>;
   private readonly thresholds: [number, number];

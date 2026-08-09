@@ -58,6 +58,8 @@ function emptyAcc(): RunAcc {
 }
 
 class DefaultCostMeter implements CostMeterPort {
+  // TODO(eviction): runs 按 runId 无限累积，长生命周期宿主（多租户/常驻）需在 report() 后删条目或加 LRU/TTL。
+  // MVP（每连接一 session 的本地宿主）增长缓慢，暂不驱逐。
   private readonly runs = new Map<string, RunAcc>();
 
   constructor(private readonly opts: CostMeterOptions) {}

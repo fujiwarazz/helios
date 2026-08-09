@@ -20,6 +20,8 @@ function serialize(key: ToolCacheKey): string {
 }
 
 class MemToolCache implements ToolResultCachePort {
+  // TODO(eviction): store 只在 get 时惰性清理过期项；global/session 无 TTL 的条目永不驱逐。
+  // 长生命周期宿主需加 LRU 或全局上限。MVP 增长缓慢，暂不处理。
   private readonly store = new Map<string, Entry>();
 
   constructor(private readonly now: () => number = Date.now) {}

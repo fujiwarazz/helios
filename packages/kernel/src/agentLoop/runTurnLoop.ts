@@ -87,7 +87,16 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       ...(decision.maxTokens !== undefined ? { maxTokens: decision.maxTokens } : {}),
     };
     // 若路由改写了 provider 则从 registry 解析实际 provider，否则用 deps 默认 provider。
-    const usedProvider: LLMProvider = decision.provider ? llmRegistry.get(decision.provider) : provider;
+    // 自定义 router 可能返回未注册的 provider id —— get() 会抛，此处兜底回退默认 provider，避免整轮崩溃。
+    let usedProvider: LLMProvider = provider;
+    if (decision.provider) {
+      try {
+        usedProvider = llmRegistry.get(decision.provider);
+      } catch {
+        logger.warn(`ModelRouter 返回未注册 provider '${decision.provider}'，回退默认 provider`);
+        effective.provider = llmOptions.provider;
+      }
+    }
 
     let streamed: Awaited<ReturnType<typeof streamAssistant>>;
     try {

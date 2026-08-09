@@ -196,7 +196,8 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
     }
   }
 
-  // PostToolUse
+  // PostToolUse：无论结果来自真实执行还是缓存命中都运行——它是对"返回给模型的 output"做后处理，
+  // 与 output 来源无关。若某 hook 依赖真实副作用发生，需自行判断（缓存命中不会重放副作用）。
   const post = await hooks.runPostToolUse({ sessionId, toolName: block.name, input, output, isError });
   if (post.output !== undefined) output = post.output;
   if (post.block) isError = true;

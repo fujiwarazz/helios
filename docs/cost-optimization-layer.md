@@ -411,6 +411,25 @@ session.sendMessage 收尾:
 
 ---
 
+## 七之补、本期实现状态（delivered vs deferred）
+
+避免"文档写得像全部已上线、实际是 MVP 切片"的误解，明确划线：
+
+**本期已交付（feat/cost-aware-runtime）**
+- 三 Port 接口 + `Usage` + Tool 缓存元数据 + PortRegistry + 四个 noop 兜底。
+- provider usage 归一化（anthropic / openai）。
+- kernel 接线：`runTurnLoop` 每轮 `route()` + `costMeter` 埋点 + `executeTools` 包 `ToolResultCache`（经 VersionProvider）+ `agent_end.costReport`。
+- 默认实现：`router-default`（Strategy tier/棘轮/Affinity + Policy 升档次数上限）、`costmeter-default`、`toolcache-mem`。
+- 单测 + kernel 集成测试 + noop 可插拔回归。
+
+**明确后延（本期未实现，勿假设已生效）**
+- **VersionProvider 实装 + builtin 工具 opt-in 缓存**：当前只有 `NoopVersionProvider`（返回 undefined），且 builtin Read/Grep/Glob/WebFetch **均未** 标 `cacheable`。故 §1.2/§4 的"session 缓存 + workspace snapshot 版本，Edit 后自然 miss"端到端**尚未接通**——缓存路径已就绪且经 fixture 工具测过，但**任何 builtin opt-in 之前必须先落地 `versionprovider-fs`**（否则会返回陈旧结果）。
+- **§2.4 agent 主动选档**：`agentOverride` 字段与 router 优先级已就位并测过，但**无 `request_model_change` 工具、无预算天花板 Policy**（router 仅实现升档次数上限）。`RouteContext.purpose` 目前恒为 `"main"`，purpose→tier0 的辅助分档在 kernel 主路径是预留能力（compact 走 CompactStrategyPort 而非此 router）。
+- **内存驱逐**：`costmeter-default.runs` / `toolcache-mem.store` / `router-default.ratchet` 三个 Map 目前**只增不删**（TTL 项惰性清理）。MVP（每连接一 session 的本地宿主）增长缓慢可接受；长生命周期/多租户宿主需加 LRU/TTL 或 session 销毁时清理（各文件已留 `TODO(eviction)`）。
+- **自动话题分叉**：见 §八，只支持人工分叉。
+
+---
+
 ## 八、Branch-aware Context Reuse（Context Runtime 层，非 Cost Port）— GPT review P2-6
 
 prefix/KV cache **不放 Cost 层**，而是结合 `branch-tree-cache` 的消息 fork 树，作为 Context Runtime 的独立能力。这可能是 helios 最有特色的点：

@@ -109,4 +109,42 @@ describe("mapOpenAIStream", () => {
       { type: "message-stop", stopReason: "end_turn" },
     ]);
   });
+
+  it("normalizes usage from trailing include_usage chunk (uncached = prompt - cached)", async () => {
+    const events = await collect([
+      { choices: [{ delta: { content: "hi" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      // 末尾 choices 为空、仅带 usage 的 chunk（stream_options.include_usage）
+      { choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 40 } } },
+    ]);
+    expect(events).toEqual([
+      { type: "text-delta", text: "hi" },
+      {
+        type: "message-stop",
+        stopReason: "end_turn",
+        usage: {
+          uncachedInputTokens: 60, // prompt(100) - cached(40)
+          cachedInputTokens: 40,
+          cacheWriteTokens: 0, // OpenAI 无 cache write
+          outputTokens: 20,
+          promptTokens: 100,
+        },
+      },
+    ]);
+  });
+
+  it("emits message-stop exactly once even when usage arrives after finish_reason", async () => {
+    const events = await collect([
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 5 } },
+    ]);
+    // 关键：finish_reason 只设停因，message-stop 延到流末尾统一 emit —— 不能出现两次
+    const stops = events.filter((e) => e.type === "message-stop");
+    expect(stops).toHaveLength(1);
+    expect(stops[0]).toEqual({
+      type: "message-stop",
+      stopReason: "end_turn",
+      usage: { uncachedInputTokens: 10, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 5, promptTokens: 10 },
+    });
+  });
 });
