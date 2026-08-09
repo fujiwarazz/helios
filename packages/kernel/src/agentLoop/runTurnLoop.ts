@@ -39,7 +39,7 @@ export interface RunTurnLoopResult {
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
   const { deps, tree, turnIdPrefix, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
-  const { provider, toolRegistry, hooks, workDir, logger, askQuestion, signal, events } = deps;
+  const { provider, toolRegistry, hooks, sessionId, workDir, logger, askQuestion, signal, events } = deps;
 
   const turnIds: string[] = [];
   let turnIndex = 0;
@@ -110,6 +110,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         parseErrorIds,
         toolRegistry,
         hooks,
+        sessionId,
         toolCtx,
         events,
       });
@@ -122,7 +123,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     }
 
     // 无工具调用：走 Stop hook 判断是否强制继续
-    const stopDecision = await hooks.runStop({ turnCount: turnIndex + 1 });
+    const stopDecision = await hooks.runStop({ sessionId, turnCount: turnIndex + 1 });
     if (stopDecision.block && stopDecision.message) {
       const injected: Message = { id: uid("msg"), role: "user", content: stopDecision.message, turnId };
       tree.appendNode(injected);

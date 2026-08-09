@@ -7,6 +7,7 @@ import type { Logger, Message } from "@helios/ports";
 import { Kernel, type Manifest, type AgentEvent } from "@helios/kernel";
 import { RpcClient, nodeWsClientTransport } from "@helios/protocol";
 import { serveKernelOverWs, type ServeHandle } from "./index";
+import { calls as hookCalls } from "../../kernel/test/fixtures/hookCaptureCapability";
 
 const silent: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 
@@ -69,5 +70,34 @@ describe("@helios/host serveKernelOverWs —— 客户端驱动真实 Kernel Ses
 
     const history = (await rpc.call("history")) as Message[];
     expect(history.some((m) => m.role === "assistant")).toBe(true);
+  });
+});
+
+describe("@helios/host serveKernelOverWs —— 连接关闭触发 SessionEnd", () => {
+  it("客户端断开连接后，绑定的 Session.dispose() 被调用，SessionEnd handler 收到通知", async () => {
+    hookCalls.length = 0;
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("hookCaptureCapability.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmWithTool.ts") },
+      ],
+    };
+    const kernel = new Kernel({ workDir, manifest, logger: silent });
+    await kernel.start();
+    const localHandle = await serveKernelOverWs({ kernel, port: 0 });
+
+    const url = `ws://127.0.0.1:${localHandle.port}`;
+    const rpc = new RpcClient(() => nodeWsClientTransport(url));
+    const sessionId = (await rpc.call("sessionId")) as string;
+    expect(sessionId).toBeTruthy();
+
+    rpc.close();
+    await waitFor(() => hookCalls.some((c) => c.event === "SessionEnd"), 5_000);
+
+    const ended = hookCalls.find((c) => c.event === "SessionEnd");
+    expect(ended?.payload).toMatchObject({ sessionId });
+
+    await localHandle.close();
   });
 });

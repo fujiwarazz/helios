@@ -108,6 +108,11 @@ export function bindSession(
       closeSub.dispose();
       approvals?.dispose();
       server.dispose();
+      // SessionEnd：连接关闭 = 本次运行时生命周期结束的通知点（会话数据仍在磁盘，可 resume）。
+      // dispose() 内部走 HookRunner.settleAll，不会真正 reject；catch 仅作防御性兜底。
+      void session.dispose().catch((err) => {
+        console.error("[helios host] session.dispose() 失败：", err);
+      });
     },
   };
 }

@@ -204,7 +204,7 @@ export class Session {
     const { ports, hooks, logger } = this.opts;
 
     // UserPromptSubmit：提交后、进入 LLM 前。可 block（不进入循环）/ 改写文本 / 追加上下文。
-    const submitDecision = await hooks.runUserPromptSubmit({ text });
+    const submitDecision = await hooks.runUserPromptSubmit({ sessionId: this.id, text });
     if (submitDecision.block) {
       const rejectRunId = uid("run");
       this.emit({ type: "agent_start", runId: rejectRunId });
@@ -225,7 +225,7 @@ export class Session {
       const startDecision = await hooks.runSessionStart({
         sessionId: this.id,
         workDir: this.opts.workDir,
-        resumed: this.wasResumed,
+        source: this.wasResumed ? "resume" : "startup",
       });
       this.sessionStartContext = startDecision.additionalContext;
     }
@@ -281,6 +281,7 @@ export class Session {
         provider: ports.llm.get(this.opts.llmOptions.provider),
         toolRegistry: this.opts.tools,
         hooks,
+        sessionId: this.id,
         workDir: this.opts.workDir,
         logger,
         askQuestion: this.opts.askQuestion,
