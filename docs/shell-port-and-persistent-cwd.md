@@ -1,4 +1,4 @@
-# ShellPort 演进方案：从无状态 Bash 到持久 cwd 的 Shell 抽象
+# ShellPort 演进方案：从无状态 Bash 到持久 cwd 的 Shell 抽象【not impl】
 
 > 基于对 helios 现有实现（`builtin/tools.ts` / `fs-node/pathGuard.ts` / `ports/types.ts` / `kernel/session.ts`）的通读，
 > 以及对 valos `ShellService`（`vectorx-code/.../shellService.ts` + `bashTool.ts`）机制的对照。

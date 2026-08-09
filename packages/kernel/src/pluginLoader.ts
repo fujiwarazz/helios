@@ -8,6 +8,10 @@ import {
   CHECKPOINT_PORT_API_VERSION,
   LLM_PROVIDER_API_VERSION,
   CAPABILITY_PROVIDER_API_VERSION,
+  MODEL_ROUTER_PORT_API_VERSION,
+  COST_METER_PORT_API_VERSION,
+  TOOL_RESULT_CACHE_PORT_API_VERSION,
+  VERSION_PROVIDER_PORT_API_VERSION,
 } from "@helios/ports";
 import type {
   KernelContext,
@@ -23,6 +27,10 @@ import {
   IMultiAgentPort,
   ICompactPort,
   ICheckpointPort,
+  IModelRouterPort,
+  ICostMeterPort,
+  IToolResultCachePort,
+  IVersionProviderPort,
 } from "./tokens";
 import { LiveLLMRegistry } from "./portRegistry";
 
@@ -33,7 +41,11 @@ export type PortName =
   | "CompactStrategyPort"
   | "CheckpointPort"
   | "LLMProvider"
-  | "CapabilityProvider";
+  | "CapabilityProvider"
+  | "ModelRouterPort"
+  | "CostMeterPort"
+  | "ToolResultCachePort"
+  | "VersionProviderPort";
 
 export interface PluginEntry {
   port: PortName;
@@ -92,6 +104,30 @@ const PORT_META: Record<PortName, PortMeta> = {
     apiVersion: CAPABILITY_PROVIDER_API_VERSION,
     requiredMethods: ["activate"],
     kind: "multi",
+  },
+  ModelRouterPort: {
+    apiVersion: MODEL_ROUTER_PORT_API_VERSION,
+    requiredMethods: ["route"],
+    kind: "single",
+    token: IModelRouterPort as ServiceToken<unknown>,
+  },
+  CostMeterPort: {
+    apiVersion: COST_METER_PORT_API_VERSION,
+    requiredMethods: ["onLLMCall", "onToolCall", "setOutcome", "report", "getUsage"],
+    kind: "single",
+    token: ICostMeterPort as ServiceToken<unknown>,
+  },
+  ToolResultCachePort: {
+    apiVersion: TOOL_RESULT_CACHE_PORT_API_VERSION,
+    requiredMethods: ["get", "set"],
+    kind: "single",
+    token: IToolResultCachePort as ServiceToken<unknown>,
+  },
+  VersionProviderPort: {
+    apiVersion: VERSION_PROVIDER_PORT_API_VERSION,
+    requiredMethods: ["get"],
+    kind: "single",
+    token: IVersionProviderPort as ServiceToken<unknown>,
   },
 };
 

@@ -103,6 +103,18 @@ export interface Tool {
    */
   executionMode?: "sequential" | "parallel";
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>;
+  // --- ToolResultCache 元数据（opt-in，默认不缓存；见 docs/cost-optimization-layer.md §1.2）---
+  /** 声明该工具结果可缓存。默认 undefined = 不缓存（安全优先）。 */
+  cacheable?: boolean;
+  /** 复用范围，默认 "run"（最安全）。 */
+  cacheScope?: "run" | "session" | "global";
+  /** global/session 缓存的过期时间；缺省不过期。 */
+  cacheTtlMs?: number;
+  /**
+   * 声明"缓存 key 应带版本"，但 Tool 不自己算版本——由 runtime 的 VersionProvider 按 kind 注入。
+   * workspace→snapshot hash（文件被 Edit 后自然 miss）；url→内容 revision；index→语义索引版本。
+   */
+  cacheVersionKind?: "workspace" | "url" | "index";
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +122,23 @@ export interface Tool {
 // ---------------------------------------------------------------------------
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "stop";
+
+/**
+ * 一次 LLM 调用的 token 用量（provider 归一化后）。字段名把语义编进类型以消歧义：
+ * 不同 provider 的 `input_tokens` 含义不一致，故用 `uncachedInputTokens`（= cache miss 的计费输入）。
+ * 见 docs/cost-optimization-layer.md §1.1。
+ */
+export interface Usage {
+  /** 计费的未缓存输入（cache miss 部分）。 */
+  uncachedInputTokens: number;
+  /** 命中缓存的输入（cache read，读价更低）。 */
+  cachedInputTokens: number;
+  /** 写缓存（cache creation，是缓存生命周期事件，不计入 context length）。 */
+  cacheWriteTokens: number;
+  outputTokens: number;
+  /** provider 明确给出的实际 prompt token 数（权威值）；不给时 contextLength ≈ uncached + cached。 */
+  promptTokens?: number;
+}
 
 export type StreamEvent =
   | { type: "text-delta"; text: string }
@@ -120,7 +149,8 @@ export type StreamEvent =
   | { type: "tool-call-start"; id: string; name: string }
   | { type: "tool-call-delta"; id: string; argsDelta: string }
   | { type: "tool-call-end"; id: string }
-  | { type: "message-stop"; stopReason: StopReason }
+  /** 结束事件；usage 由 provider 归一化后携带，CostMeter 据此计量（缺省则无计量）。 */
+  | { type: "message-stop"; stopReason: StopReason; usage?: Usage }
   | { type: "error"; error: string };
 
 export interface LLMOptions {
@@ -327,6 +357,11 @@ export interface PortRegistry {
   compact: import("./compact").CompactStrategyPort;
   checkpoint: import("./checkpoint").CheckpointPort;
   llm: LLMRegistry;
+  // --- Cost-aware Runtime（均有 noop 兜底，缺失不影响 kernel 运行）---
+  modelRouter: import("./modelRouter").ModelRouterPort;
+  costMeter: import("./costMeter").CostMeterPort;
+  toolCache: import("./toolResultCache").ToolResultCachePort;
+  versionProvider: import("./versionProvider").VersionProviderPort;
 }
 
 /** 多实例 LLMProvider 的运行时选用入口 */

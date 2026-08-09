@@ -6,10 +6,21 @@ const h = vi.hoisted(() => ({ captured: undefined as unknown }));
 
 vi.mock("@anthropic-ai/sdk", () => {
   async function* fakeStream() {
+    yield {
+      type: "message_start",
+      message: {
+        usage: {
+          input_tokens: 100,
+          cache_read_input_tokens: 40,
+          cache_creation_input_tokens: 10,
+          output_tokens: 1,
+        },
+      },
+    };
     yield { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "abc" } };
     yield { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-1" } };
     yield { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "hi" } };
-    yield { type: "message_delta", delta: { stop_reason: "end_turn" } };
+    yield { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 25 } };
     yield { type: "message_stop" };
   }
   return {
@@ -58,7 +69,17 @@ describe("AnthropicProvider.streamMessage —— thinking 请求与映射", () =
       { type: "thinking-delta", text: "abc" },
       { type: "thinking-signature", signature: "sig-1" },
       { type: "text-delta", text: "hi" },
-      { type: "message-stop", stopReason: "end_turn" },
+      {
+        type: "message-stop",
+        stopReason: "end_turn",
+        // usage 归一化：input_tokens→uncached，cache_read→cached，cache_creation→write，output 取 message_delta 累积值。
+        usage: {
+          uncachedInputTokens: 100,
+          cachedInputTokens: 40,
+          cacheWriteTokens: 10,
+          outputTokens: 25,
+        },
+      },
     ]);
   });
 

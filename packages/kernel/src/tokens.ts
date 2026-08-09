@@ -6,6 +6,10 @@ import type {
   MultiAgentPort,
   CompactStrategyPort,
   CheckpointPort,
+  ModelRouterPort,
+  CostMeterPort,
+  ToolResultCachePort,
+  VersionProviderPort,
 } from "@helios/ports";
 import { createServiceToken } from "./serviceCollection";
 
@@ -14,3 +18,7 @@ export const IMemoryPort = createServiceToken<MemoryPort>("MemoryPort");
 export const IMultiAgentPort = createServiceToken<MultiAgentPort>("MultiAgentPort");
 export const ICompactPort = createServiceToken<CompactStrategyPort>("CompactStrategyPort");
 export const ICheckpointPort = createServiceToken<CheckpointPort>("CheckpointPort");
+export const IModelRouterPort = createServiceToken<ModelRouterPort>("ModelRouterPort");
+export const ICostMeterPort = createServiceToken<CostMeterPort>("CostMeterPort");
+export const IToolResultCachePort = createServiceToken<ToolResultCachePort>("ToolResultCachePort");
+export const IVersionProviderPort = createServiceToken<VersionProviderPort>("VersionProviderPort");

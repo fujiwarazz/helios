@@ -1,4 +1,4 @@
-import type { Message, ContentBlock, Tool, LLMOptions, LLMProvider, StopReason, StreamEvent, Logger } from "@helios/ports";
+import type { Message, ContentBlock, Tool, LLMOptions, LLMProvider, StopReason, StreamEvent, Logger, Usage } from "@helios/ports";
 import { uid } from "../ids";
 import type { AgentEventEmitter } from "../events";
 import type { ToolUseBlock } from "./types";
@@ -24,6 +24,8 @@ export interface StreamAssistantResult {
   streamError?: string;
   /** 参数 JSON 解析失败 / 因输出截断（max_tokens）而判失败的 tool_use id 集合，executeTools 据此回传错误。 */
   parseErrorIds: Set<string>;
+  /** provider 归一化后的 token 用量（CostMeter 据此计量）；provider 未提供则 undefined。 */
+  usage?: Usage;
 }
 
 /** for-await 循环期间的累积态；每种 StreamEvent 只改自己关心的字段。 */
@@ -35,6 +37,7 @@ interface StreamAccumulator {
   order: string[];
   stopReason: StopReason;
   streamError?: string;
+  usage?: Usage;
 }
 
 type StreamEventHandler<E extends StreamEvent = StreamEvent> = (acc: StreamAccumulator, ev: E, logger: Logger) => void;
@@ -64,6 +67,7 @@ const STREAM_EVENT_HANDLERS: { [K in StreamEvent["type"]]: StreamEventHandler<Ex
   "tool-call-end": () => {},
   "message-stop": (acc, ev) => {
     acc.stopReason = ev.stopReason;
+    acc.usage = ev.usage;
   },
   error: (acc, ev, logger) => {
     // Bug 3：不再 throw 穿透整个 run，记录错误并中断流，交由调用方优雅收尾。
@@ -131,7 +135,7 @@ export async function streamAssistant(params: StreamAssistantParams): Promise<St
 
   const assistantMsg: Message = { id: messageId, role: "assistant", content };
   events.emit({ type: "message_end", messageId, role: "assistant", stopReason });
-  return { assistantMsg, stopReason, toolUseBlocks, streamError: acc.streamError, parseErrorIds };
+  return { assistantMsg, stopReason, toolUseBlocks, streamError: acc.streamError, parseErrorIds, usage: acc.usage };
 }
 
 /**

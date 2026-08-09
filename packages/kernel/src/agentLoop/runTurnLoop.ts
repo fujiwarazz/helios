@@ -1,8 +1,10 @@
-import type { Message, LLMOptions } from "@helios/ports";
+import type { Message, LLMOptions, LLMProvider, RouteContext, RouteSignals } from "@helios/ports";
 import { uid } from "../ids";
 import { streamAssistant } from "./streamAssistant";
 import { executeTools } from "./executeTools";
-import type { RunLoopDeps, SessionTreeCallbacks } from "./types";
+import type { RunLoopDeps, SessionTreeCallbacks, ToolUseBlock } from "./types";
+import type { ToolResultRecord } from "../events";
+import { approxTokens, pathHasCode, stableStringify } from "./canonical";
 
 export interface RunTurnLoopParams {
   /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
@@ -11,6 +13,8 @@ export interface RunTurnLoopParams {
   tree: SessionTreeCallbacks;
   /** turnId 前缀，通常是 `${session.id}-${runIndex}` */
   turnIdPrefix: string;
+  /** 本 run 的唯一 id，供 CostMeter 计量与 ToolResultCache 的 run scope。 */
+  runId: string;
   runIndex: number;
   maxTurns: number;
   system: string;
@@ -38,13 +42,23 @@ export interface RunTurnLoopResult {
  * 只通过 `tree` 回调驱动 —— 调用方（Session）继续独占树状态。
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
-  const { deps, tree, turnIdPrefix, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
+  const { deps, tree, turnIdPrefix, runId, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
   const { provider, toolRegistry, hooks, sessionId, workDir, logger, askQuestion, signal, events } = deps;
+  const { modelRouter, costMeter, toolCache, versionProvider, llmRegistry } = deps;
 
   const turnIds: string[] = [];
   let turnIndex = 0;
   let pendingLeadMessages = params.pendingLeadMessages;
   let runError: string | undefined;
+
+  // 本 run 的路由信号累积（供 ModelRouter 每轮采集），随本 run 生命周期存在于闭包内。
+  const routeState = {
+    toolUseCountSoFar: 0,
+    lastTurnHadError: false,
+    lastTurnParseError: false,
+    repeatedToolCall: false,
+    lastToolSignature: null as string | null,
+  };
 
   while (turnIndex < maxTurns) {
     if (signal.aborted) break; // 已中断：不再开新 turn
@@ -62,13 +76,35 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const checkpointRef = await tree.snapshotCheckpoint(turnId);
     events.emit({ type: "turn_start", turnId });
 
+    // ModelRouter：每轮选 provider+model+参数（noop 返回 {} 即不改写）。
+    const path = tree.pathToHead();
+    const decision = await modelRouter.route(buildRouteContext(sessionId, turnIndex, path, toolRegistry.list().length, routeState));
+    const effective: LLMOptions = {
+      ...llmOptions,
+      ...(decision.provider !== undefined ? { provider: decision.provider } : {}),
+      ...(decision.model !== undefined ? { model: decision.model } : {}),
+      ...(decision.thinking !== undefined ? { thinking: decision.thinking } : {}),
+      ...(decision.maxTokens !== undefined ? { maxTokens: decision.maxTokens } : {}),
+    };
+    // 若路由改写了 provider 则从 registry 解析实际 provider，否则用 deps 默认 provider。
+    // 自定义 router 可能返回未注册的 provider id —— get() 会抛，此处兜底回退默认 provider，避免整轮崩溃。
+    let usedProvider: LLMProvider = provider;
+    if (decision.provider) {
+      try {
+        usedProvider = llmRegistry.get(decision.provider);
+      } catch {
+        logger.warn(`ModelRouter 返回未注册 provider '${decision.provider}'，回退默认 provider`);
+        effective.provider = llmOptions.provider;
+      }
+    }
+
     let streamed: Awaited<ReturnType<typeof streamAssistant>>;
     try {
       streamed = await streamAssistant({
-        provider,
-        messages: tree.pathToHead(),
+        provider: usedProvider,
+        messages: path,
         tools: toolRegistry.list(),
-        llmOptions,
+        llmOptions: effective,
         system,
         signal,
         turnId,
@@ -80,8 +116,18 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       if (signal.aborted) break;
       throw err;
     }
-    const { assistantMsg, toolUseBlocks, streamError, parseErrorIds } = streamed;
+    const { assistantMsg, toolUseBlocks, streamError, parseErrorIds, usage } = streamed;
     assistantMsg.turnId = turnId;
+
+    // CostMeter 计量（旁路观察）：有 usage 才记，noop 时为空操作。
+    if (usage) {
+      costMeter.onLLMCall(runId, {
+        provider: usedProvider.id,
+        model: effective.model ?? "",
+        usage,
+        purpose: "main",
+      });
+    }
 
     // Bug 7：只有非空 assistant 消息才入树/持久化，避免 content:[] 触发下游 API 报错。
     // thinking 块不算有效正文——只思考不回答/不调工具视为空轮，不入树（N3：丢弃 + 本 run 正常结束，不重试）。
@@ -113,9 +159,15 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         sessionId,
         toolCtx,
         events,
+        costMeter,
+        toolCache,
+        versionProvider,
+        runId,
       });
       tree.appendNode(toolResultMsg);
       turnMessages.push(toolResultMsg);
+      // 采集下一轮路由信号：错误 / 解析失败 / 打转（同名同参连续），并累加工具使用次数。
+      updateRouteSignals(routeState, toolUseBlocks, records, parseErrorIds);
       await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
       events.emit({ type: "turn_end", turnId, toolResults: records });
       turnIndex++;
@@ -141,4 +193,58 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
   }
 
   return { turnIds, runError, reachedMaxTurns: turnIndex >= maxTurns };
+}
+
+interface RouteSignalState {
+  toolUseCountSoFar: number;
+  lastTurnHadError: boolean;
+  lastTurnParseError: boolean;
+  repeatedToolCall: boolean;
+  lastToolSignature: string | null;
+}
+
+/** 组装本轮路由上下文（廉价统计 + 上轮信号），不传完整 messages。 */
+function buildRouteContext(
+  sessionId: string,
+  turnIndex: number,
+  path: Message[],
+  toolCount: number,
+  state: RouteSignalState,
+): RouteContext {
+  const ctxTokens = approxTokens(path);
+  const signals: RouteSignals = {
+    contextTokens: ctxTokens,
+    toolUseCountSoFar: state.toolUseCountSoFar,
+    lastTurnHadError: state.lastTurnHadError,
+    lastTurnParseError: state.lastTurnParseError,
+    retriedLastTurn: state.lastTurnParseError, // 参数解析失败 → 下一轮等效重试
+    repeatedToolCall: state.repeatedToolCall,
+  };
+  return {
+    sessionId,
+    turnIndex,
+    purpose: "main",
+    signals,
+    contextStats: {
+      inputTokens: ctxTokens,
+      toolCount,
+      messageCount: path.length,
+      hasCode: pathHasCode(path),
+    },
+  };
+}
+
+/** 采集下一轮的路由信号：错误 / 解析失败 / 打转（同名同参连续），并累加工具使用次数。 */
+function updateRouteSignals(
+  state: RouteSignalState,
+  toolUseBlocks: ToolUseBlock[],
+  records: ToolResultRecord[],
+  parseErrorIds: Set<string>,
+): void {
+  state.toolUseCountSoFar += toolUseBlocks.length;
+  state.lastTurnHadError = records.some((r) => r.isError);
+  state.lastTurnParseError = parseErrorIds.size > 0;
+  const signature = toolUseBlocks.map((b) => `${b.name}(${stableStringify(b.input)})`).join("|");
+  state.repeatedToolCall = signature.length > 0 && signature === state.lastToolSignature;
+  state.lastToolSignature = signature;
 }

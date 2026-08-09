@@ -50,6 +50,8 @@ class OpenAIProvider implements LLMProvider {
         messages: toOpenAIMessages(messages, opts.system),
         tools: tools.length ? toOpenAITools(tools) : undefined,
         stream: true,
+        // 让末尾 chunk 携带 usage，供 CostMeter 计量。
+        stream_options: { include_usage: true },
       },
       { signal: opts.signal },
     );

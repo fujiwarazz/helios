@@ -13,6 +13,12 @@ import type {
   Summary,
   Ref,
   Disposable,
+  ModelRouterPort,
+  CostMeterPort,
+  ToolResultCachePort,
+  VersionProviderPort,
+  TaskCostReport,
+  CostUsage,
 } from "@helios/ports";
 
 export const NoopMemory: MemoryPort = {
@@ -60,5 +66,54 @@ export const NoopCheckpoint: CheckpointPort = {
   },
   async restore(_ref: Ref): Promise<void> {
     // 空实现：回溯只截断对话历史，不还原文件
+  },
+};
+
+// --- Cost-aware Runtime 的 no-op 兜底：装配层未提供实现时自动注册，行为等价"关闭该能力" ---
+
+export const NoopModelRouter: ModelRouterPort = {
+  route() {
+    return {}; // 不改写，用调用方原 LLMOptions
+  },
+};
+
+const emptyReport = (runId: string): TaskCostReport => ({
+  runId,
+  uncachedInputTokens: 0,
+  cachedInputTokens: 0,
+  cacheWriteTokens: 0,
+  outputTokens: 0,
+  contextLength: 0,
+  llmCalls: 0,
+  toolCalls: 0,
+  toolExecutions: 0,
+  toolCacheHits: 0,
+  avgContextLength: 0,
+});
+
+export const NoopCostMeter: CostMeterPort = {
+  onLLMCall(): void {},
+  onToolCall(): void {},
+  setOutcome(): void {},
+  report(runId: string): TaskCostReport {
+    return emptyReport(runId);
+  },
+  getUsage(): CostUsage {
+    return { spent: 0, uncachedInputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+  },
+};
+
+export const NoopToolResultCache: ToolResultCachePort = {
+  async get() {
+    return undefined; // 恒未命中 = 关闭缓存
+  },
+  async set() {
+    // 空实现：不写入
+  },
+};
+
+export const NoopVersionProvider: VersionProviderPort = {
+  get() {
+    return undefined; // 无版本 → 缓存退化为仅按 scope/TTL
   },
 };

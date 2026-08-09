@@ -287,6 +287,12 @@ export class Session {
         askQuestion: this.opts.askQuestion,
         signal: abort.signal,
         events: { emit: (e) => this.emit(e) },
+        // Cost-aware Runtime：均有 noop 兜底，缺失即等价关闭该能力。
+        modelRouter: ports.modelRouter,
+        costMeter: ports.costMeter,
+        toolCache: ports.toolCache,
+        versionProvider: ports.versionProvider,
+        llmRegistry: ports.llm,
       },
       tree: {
         appendNode: (msg) => this.appendNode(msg),
@@ -296,6 +302,7 @@ export class Session {
         persistTurn: (record) => this.persistTurn(record),
       },
       turnIdPrefix: `${this.id}-${runIndex}`,
+      runId,
       runIndex,
       maxTurns: this.maxTurns,
       system,
@@ -309,6 +316,14 @@ export class Session {
     }
 
     const newMessages = this.pathToHead().slice(before);
+    // CostMeter 收尾：记录任务结果并产出成本报告（noop 时为全零报告）。
+    const outcomeStatus: "success" | "failure" | "cancelled" = abort.signal.aborted
+      ? "cancelled"
+      : runError
+        ? "failure"
+        : "success";
+    ports.costMeter.setOutcome(runId, { status: outcomeStatus });
+    const costReport = ports.costMeter.report(runId);
     if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",
@@ -317,6 +332,7 @@ export class Session {
       newMessages,
       error: runError,
       reachedMaxTurns: reachedMaxTurns || undefined,
+      costReport,
     });
     logger.debug(`run ${runId} 完成，共 ${turnIds.length} 个 turn`);
     return newMessages;

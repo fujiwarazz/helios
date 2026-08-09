@@ -181,6 +181,12 @@ importers:
         specifier: workspace:*
         version: link:../ports
 
+  packages/costmeter-default:
+    dependencies:
+      '@helios/ports':
+        specifier: workspace:*
+        version: link:../ports
+
   packages/fs-node:
     dependencies:
       '@helios/ports':
@@ -273,7 +279,19 @@ importers:
         specifier: ^8.5.12
         version: 8.18.1
 
+  packages/router-default:
+    dependencies:
+      '@helios/ports':
+        specifier: workspace:*
+        version: link:../ports
+
   packages/teams-mailbox:
+    dependencies:
+      '@helios/ports':
+        specifier: workspace:*
+        version: link:../ports
+
+  packages/toolcache-mem:
     dependencies:
       '@helios/ports':
         specifier: workspace:*

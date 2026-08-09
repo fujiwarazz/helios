@@ -4,8 +4,13 @@ import type {
   Ref,
   Logger,
   LLMProvider,
+  LLMRegistry,
   AskQuestionRequest,
   AskQuestionResponse,
+  ModelRouterPort,
+  CostMeterPort,
+  ToolResultCachePort,
+  VersionProviderPort,
 } from "@helios/ports";
 import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
@@ -44,6 +49,17 @@ export interface RunLoopDeps {
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
   signal: AbortSignal;
   events: AgentEventEmitter;
+  // --- Cost-aware Runtime（均有 noop 兜底，缺失即等价关闭该能力）---
+  /** 每轮选 provider+model；供 ModelRouter 改写 llmOptions。 */
+  modelRouter: ModelRouterPort;
+  /** 计量 usage / 工具调用 / 结果。 */
+  costMeter: CostMeterPort;
+  /** 幂等只读工具的结果缓存。 */
+  toolCache: ToolResultCachePort;
+  /** 按 kind 提供缓存版本串（使 Tool Port 不必知道 workspace）。 */
+  versionProvider: VersionProviderPort;
+  /** 按 ModelRouter 决策 provider 解析实际 LLMProvider（跨 provider 切换时用）。 */
+  llmRegistry: LLMRegistry;
 }
 
 /**
