@@ -110,6 +110,35 @@ describe("useChat", () => {
     });
     expect(result.current.messages.map((m) => m.text)).toEqual(["hi", "hey"]);
   });
+
+  it("client 切换(切会话/新建会话) → 清空上一个会话的残留消息,不与新会话历史混在一起", async () => {
+    const { client: clientA, emit: emitA } = makeMockClient([]);
+    const { result, rerender } = renderHook(({ client }) => useChat(client), {
+      initialProps: { client: clientA },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      emitA(runStart);
+      emitA(msgStart);
+      emitA(delta("会话A的回复"));
+    });
+    expect(result.current.messages).toHaveLength(1);
+
+    // 切到会话 B(新 client,历史为空——对应"新建会话"或切到一个空会话)
+    const { client: clientB } = makeMockClient([]);
+    rerender({ client: clientB });
+    // setState(initialState) 是同步的,不需要等 tick 就应该已清空
+    expect(result.current.messages).toHaveLength(0);
+    expect(result.current.isStreaming).toBe(false);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // 历史拉取完成后仍为空,会话 A 的消息不会渗透进来
+    expect(result.current.messages).toHaveLength(0);
+  });
 });
 
 describe("reduce —— 幂等 / 容忍乱序 / 重复", () => {

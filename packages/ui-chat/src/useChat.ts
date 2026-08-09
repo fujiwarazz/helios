@@ -344,6 +344,10 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
 
   useEffect(() => {
     const aliveRef = { alive: true };
+    // client 变化 = 真实切会话/新建会话（reconnect 由 RpcClient 内部处理，不会走到这里、
+    // 不会换 client 引用）：先清空上一个会话的残留消息/流式态，避免新会话的消息列表里
+    // 还拖着上一个会话的内容，让人以为"切换没有效果"。
+    setState(initialState);
     mergeHistory(aliveRef);
     const offEvent = client.onEvent((e) => {
       setState((prev) => reduce(prev, e, renderTool));
