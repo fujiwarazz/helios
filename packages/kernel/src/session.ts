@@ -8,6 +8,7 @@ import type {
   AskQuestionRequest,
   AskQuestionResponse,
   ConversationState,
+  Runtime,
 } from "@helios/ports";
 import { ToolRegistry } from "./toolRegistry";
 import { HookRunner } from "./hookRunner";
@@ -17,6 +18,7 @@ import { snapCompactionCut, reconstructPath, type CompactionRecord } from "./mes
 import { runTurnLoop } from "./agentLoop/runTurnLoop";
 import type { TurnRecord } from "./agentLoop/types";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
+import { CostAwareRuntime } from "./agentLoop/costAwareRuntime";
 
 /** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
 interface PersistedCompaction {
@@ -99,10 +101,18 @@ export class Session {
   private wasResumed = false;
   /** SessionStart handler 返回的 additionalContext，随 systemPrefix 一起冻结注入。 */
   private sessionStartContext: string | undefined;
+  /**
+   * Harness 组装的 Runtime 数组：构造时把已装配的 Cost-aware Port 粘合成 loop 认识的统一形状，
+   * 一次组装、跨本会话全部 run 复用。Session 之后不再直接调用 modelRouter/costMeter/toolCache/
+   * versionProvider 任何一个 Port 方法——调用永远发生在 loop（runTurnLoop/executeTools）内部
+   * 的固定分发点，Session 只负责"组装出这个数组"。
+   */
+  private readonly runtimes: Runtime[];
 
   constructor(private readonly opts: SessionOptions) {
     this.id = opts.id;
     this.maxTurns = opts.maxTurns ?? 25;
+    this.runtimes = [new CostAwareRuntime(opts.ports)];
   }
 
   on(listener: AgentEventListener): () => void {
@@ -283,7 +293,7 @@ export class Session {
       }
     }
 
-    const { turnIds, runError, reachedMaxTurns } = await runTurnLoop({
+    const { turnIds, runError, reachedMaxTurns, costReport } = await runTurnLoop({
       deps: {
         provider: ports.llm.get(this.opts.llmOptions.provider),
         toolRegistry: this.opts.tools,
@@ -294,11 +304,8 @@ export class Session {
         askQuestion: this.opts.askQuestion,
         signal: abort.signal,
         events: { emit: (e) => this.emit(e) },
-        // Cost-aware Runtime：均有 noop 兜底，缺失即等价关闭该能力。
-        modelRouter: ports.modelRouter,
-        costMeter: ports.costMeter,
-        toolCache: ports.toolCache,
-        versionProvider: ports.versionProvider,
+        // Cost-aware Runtime：Session 构造时组装好的数组，loop 内固定分发点逐一调用。
+        runtimes: this.runtimes,
         llmRegistry: ports.llm,
         llmRetry: this.opts.llmRetry,
         sleep: this.opts.sleep,
@@ -326,14 +333,7 @@ export class Session {
     }
 
     const newMessages = this.pathToHead().slice(before);
-    // CostMeter 收尾：记录任务结果并产出成本报告（noop 时为全零报告）。
-    const outcomeStatus: "success" | "failure" | "cancelled" = abort.signal.aborted
-      ? "cancelled"
-      : runError
-        ? "failure"
-        : "success";
-    ports.costMeter.setOutcome(runId, { status: outcomeStatus });
-    const costReport = ports.costMeter.report(runId);
+    // costReport 已由 runTurnLoop 内部对 runtimes 分发 onRunEnd 产出；Session 不再直接调用任何 Port。
     if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",

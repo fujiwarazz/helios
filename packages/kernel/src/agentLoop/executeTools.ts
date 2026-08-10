@@ -1,19 +1,11 @@
-import type {
-  ContentBlock,
-  ToolContext,
-  Message,
-  Tool,
-  CostMeterPort,
-  ToolResultCachePort,
-  VersionProviderPort,
-  ToolCacheKey,
-} from "@helios/ports";
+import type { ContentBlock, ToolContext, Message, Tool, Runtime, ToolCacheKey, ToolResult } from "@helios/ports";
 import { uid } from "../ids";
 import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
 import type { AgentEventEmitter, ToolResultRecord } from "../events";
 import type { ToolUseBlock } from "./types";
 import { stableStringify } from "./canonical";
+import { dispatchCacheVersion, dispatchBeforeTool, dispatchAfterTool } from "./runtimeDispatch";
 
 export interface ExecuteToolsParams {
   turnId: string;
@@ -26,10 +18,8 @@ export interface ExecuteToolsParams {
   sessionId: string;
   toolCtx: ToolContext;
   events: AgentEventEmitter;
-  // --- Cost-aware Runtime（均有 noop 兜底）---
-  costMeter: CostMeterPort;
-  toolCache: ToolResultCachePort;
-  versionProvider: VersionProviderPort;
+  // --- Cost-aware Runtime（数组，元素粘合自已装配的 Port；空数组即等价关闭该能力）---
+  runtimes: Runtime[];
   runId: string;
 }
 
@@ -51,9 +41,7 @@ interface ToolExecCtx {
   sessionId: string;
   toolCtx: ToolContext;
   events: AgentEventEmitter;
-  costMeter: CostMeterPort;
-  toolCache: ToolResultCachePort;
-  versionProvider: VersionProviderPort;
+  runtimes: Runtime[];
   runId: string;
 }
 
@@ -71,9 +59,7 @@ export async function executeTools(params: ExecuteToolsParams): Promise<ExecuteT
     sessionId,
     toolCtx,
     events,
-    costMeter: params.costMeter,
-    toolCache: params.toolCache,
-    versionProvider: params.versionProvider,
+    runtimes: params.runtimes,
     runId: params.runId,
   };
 
@@ -104,28 +90,37 @@ async function sequentialMap<T, R>(items: T[], fn: (item: T) => Promise<R>): Pro
   return out;
 }
 
-/** 组 ToolResultCache key：scopeId 按 scope 取；version 由 VersionProvider 按 kind 注入。 */
+/** 组 ToolResultCache key：scopeId 按 scope 取；version 由 runtimes 按 kind 查询注入。 */
 async function buildCacheKey(ctx: ToolExecCtx, tool: Tool, input: unknown): Promise<ToolCacheKey> {
   const scope = tool.cacheScope ?? "run";
   const scopeId = scope === "run" ? ctx.runId : scope === "session" ? ctx.sessionId : "global";
   const version = tool.cacheVersionKind
-    ? await ctx.versionProvider.get(tool.cacheVersionKind, input)
+    ? await dispatchCacheVersion(ctx.runtimes, tool.cacheVersionKind, input)
     : undefined;
   return { toolName: tool.name, argsCanonical: stableStringify(input), scope, scopeId, version };
 }
 
 /** 单个工具的 PreToolUse → ask → (cache) execute → PostToolUse → emit start/end 全流程。 */
 async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<OneToolCallResult> {
-  const { parseErrorIds, toolRegistry, hooks, sessionId, toolCtx, events, costMeter, runId } = ctx;
+  const { parseErrorIds, toolRegistry, hooks, sessionId, toolCtx, events, runtimes, runId } = ctx;
   let input = block.input;
   let output: unknown;
   let isError = false;
   let cacheHit = false;
   let executed = false;
+  // 缓存写入信息在真正执行成功的那一刻定格，不随后续 PostToolUse 改写 output/isError 而变化
+  // （与改造前"cache-set 发生在 PostToolUse 之前"的时序完全一致）。
+  let cacheKey: ToolCacheKey | undefined;
+  let cacheWrite: { result: ToolResult; ttlMs?: number } | undefined;
 
-  const finish = (): OneToolCallResult => {
+  const finish = async (): Promise<OneToolCallResult> => {
     events.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
-    costMeter.onToolCall(runId, { name: block.name, cacheHit, executed });
+    await dispatchAfterTool(
+      runtimes,
+      runId,
+      { name: block.name, cacheHit, executed },
+      cacheKey && cacheWrite ? { key: cacheKey, result: cacheWrite.result, ttlMs: cacheWrite.ttlMs } : undefined,
+    );
     return {
       resultBlock: { type: "tool_result", toolUseId: block.id, output, isError },
       record: { toolUseId: block.id, name: block.name, output, isError },
@@ -177,9 +172,9 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
     return finish();
   }
 
-  // ToolResultCache：仅对 opt-in 的幂等/只读工具生效（noop 时恒未命中）。
-  const cacheKey = tool.cacheable ? await buildCacheKey(ctx, tool, input) : undefined;
-  const cached = cacheKey ? await ctx.toolCache.get(cacheKey) : undefined;
+  // ToolResultCache：仅对 opt-in 的幂等/只读工具生效（无 runtime 实现时恒未命中）。
+  cacheKey = tool.cacheable ? await buildCacheKey(ctx, tool, input) : undefined;
+  const cached = cacheKey ? await dispatchBeforeTool(runtimes, cacheKey) : undefined;
   if (cached) {
     output = cached.output;
     isError = !!cached.isError;
@@ -192,7 +187,7 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
       executed = true;
       // 只缓存非错误结果，避免把偶发失败固化。
       if (cacheKey && !isError) {
-        await ctx.toolCache.set(cacheKey, { output, isError }, tool.cacheTtlMs);
+        cacheWrite = { result: { output, isError }, ttlMs: tool.cacheTtlMs };
       }
     } catch (err) {
       output = err instanceof Error ? err.message : String(err);
