@@ -49,6 +49,12 @@ export interface CreateSessionOptions {
   llmRetry?: LlmRetryOptions;
   /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待。 */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * 上下文预算可观测性阈值（估算 token 数）：run 中途 message path 估算值超过该阈值时记录一次
+   * warning（不触发压缩，纯观察）。不传则不检查，默认关闭。估算值不含 system/tools，见
+   * `agentLoop/contextBudget.ts`。
+   */
+  contextBudgetWarnTokens?: number;
 }
 
 export class Kernel {
@@ -56,13 +62,16 @@ export class Kernel {
   private readonly services = new ServiceCollection();
   private readonly llm = new LiveLLMRegistry();
   private readonly tools = new ToolRegistry();
-  private readonly hooks = new HookRunner();
+  private readonly hooks: HookRunner;
   private readonly renderers = new Map<string, ToolRenderer>();
   private readonly ports = createLivePortRegistry(this.services, this.llm);
   private started = false;
 
   constructor(private readonly opts: KernelOptions) {
     this.logger = opts.logger ?? consoleLogger();
+    // HookRunner 依赖 this.logger 记录 handler 异常，字段初始化器早于构造函数体（this.logger 此时
+    // 尚未赋值），故延后到这里构造，而不是像其它字段那样用类字段初始化器。
+    this.hooks = new HookRunner(this.logger);
   }
 
   /** 装配：加载 manifest 插件 → 校验必须实现的 Port → 激活能力提供者。 */
@@ -155,6 +164,7 @@ export class Kernel {
       maxTurns: opts.maxTurns,
       llmRetry: opts.llmRetry,
       sleep: opts.sleep,
+      contextBudgetWarnTokens: opts.contextBudgetWarnTokens,
     });
   }
 

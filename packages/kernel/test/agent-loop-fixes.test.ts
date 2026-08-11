@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { Kernel, type Manifest, LlmProviderError } from "../src/index";
 import type { AgentEvent } from "../src/events";
 import type { LlmRetryOptions } from "../src/agentLoop/retryBackoff";
 import { callLog as parallelCallLog } from "./fixtures/mockCapabilityParallel";
+import { behavior as preToolUseBehavior } from "./fixtures/mockCapabilityPreToolUse";
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -34,7 +35,13 @@ async function bootSession(
   llmFixture: string,
   extraPlugins: Manifest["plugins"] = [],
   maxTurns?: number,
-  sessionOpts: { llmRetry?: LlmRetryOptions; sleep?: (ms: number) => Promise<void> } = {},
+  sessionOpts: {
+    llmRetry?: LlmRetryOptions;
+    sleep?: (ms: number) => Promise<void>;
+    askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
+    logger?: Logger;
+    contextBudgetWarnTokens?: number;
+  } = {},
 ) {
   const manifest: Manifest = {
     plugins: [
@@ -43,10 +50,11 @@ async function bootSession(
       { port: "LLMProvider", package: fixture(llmFixture) },
     ],
   };
-  const kernel = new Kernel({ workDir, manifest, logger: silentLogger });
+  const { askQuestion, logger, ...rest } = sessionOpts;
+  const kernel = new Kernel({ workDir, manifest, logger: logger ?? silentLogger });
   await kernel.start();
   const events: AgentEvent[] = [];
-  const session = kernel.createSession({ askQuestion: noAsk, maxTurns, ...sessionOpts });
+  const session = kernel.createSession({ askQuestion: askQuestion ?? noAsk, maxTurns, ...rest });
   session.on((e) => events.push(e));
   return { session, events };
 }
@@ -259,5 +267,157 @@ describe("issue #10 —— LLM 错误分层重试 harness", () => {
     const llmErr = caught as LlmProviderError;
     expect(llmErr.cause).toBeInstanceOf(TypeError);
     expect((llmErr.cause as TypeError).message).toBe("provider 内部 bug");
+  });
+});
+
+describe("Fix 2 —— 工具生命周期闭合：deny / 审批拒绝补齐 tool_execution_start", () => {
+  afterEach(() => {
+    preToolUseBehavior.preToolUse = undefined;
+  });
+
+  it("PreToolUse deny：start/end 各恰好一次、toolUseId 一致、start.input 是模型原始请求参数", async () => {
+    preToolUseBehavior.preToolUse = () => ({ decision: "deny", reason: "禁止" });
+    const { session, events } = await bootSession("mockLlmWithTool.ts", [
+      { port: "CapabilityProvider", package: fixture("mockCapabilityPreToolUse.ts") },
+    ]);
+
+    await session.sendMessage("go");
+
+    const starts = events.filter((e) => e.type === "tool_execution_start");
+    const ends = events.filter((e) => e.type === "tool_execution_end");
+    expect(starts).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ toolUseId: "t1", input: { text: "hi" } });
+    expect(ends[0]).toMatchObject({ toolUseId: "t1", isError: true });
+    expect(JSON.stringify(ends[0])).toContain("禁止");
+  });
+
+  it("用户拒绝审批：start/end 各恰好一次、toolUseId 一致、start.input 是模型原始请求参数", async () => {
+    preToolUseBehavior.preToolUse = () => ({ decision: "ask" });
+    const rejectAsk = async (_r: AskQuestionRequest): Promise<AskQuestionResponse> => ({ answers: ["拒绝"] });
+    const { session, events } = await bootSession(
+      "mockLlmWithTool.ts",
+      [{ port: "CapabilityProvider", package: fixture("mockCapabilityPreToolUse.ts") }],
+      undefined,
+      { askQuestion: rejectAsk },
+    );
+
+    await session.sendMessage("go");
+
+    const starts = events.filter((e) => e.type === "tool_execution_start");
+    const ends = events.filter((e) => e.type === "tool_execution_end");
+    expect(starts).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ toolUseId: "t1", input: { text: "hi" } });
+    expect(ends[0]).toMatchObject({ toolUseId: "t1", isError: true });
+    expect(JSON.stringify(ends[0])).toContain("被用户拒绝");
+  });
+
+  it("正常路径回归：PreToolUse 改写 input 后，start.input 仍是改写后的值（不是模型原始请求）", async () => {
+    preToolUseBehavior.preToolUse = () => ({ decision: "allow", input: { text: "rewritten" } });
+    const { session, events } = await bootSession("mockLlmWithTool.ts", [
+      { port: "CapabilityProvider", package: fixture("mockCapabilityPreToolUse.ts") },
+    ]);
+
+    await session.sendMessage("go");
+
+    const starts = events.filter((e) => e.type === "tool_execution_start");
+    const ends = events.filter((e) => e.type === "tool_execution_end");
+    expect(starts).toHaveLength(1);
+    expect(ends).toHaveLength(1);
+    expect(starts[0]).toMatchObject({ toolUseId: "t1", input: { text: "rewritten" } });
+    expect(ends[0]).toMatchObject({ toolUseId: "t1", isError: false, output: "echo:rewritten" });
+  });
+});
+
+describe("Fix 3（可观测性）—— 上下文预算 warning：不改变压缩行为，每 run 只报一次", () => {
+  function recordingLogger(): { logger: Logger; warnCalls: string[] } {
+    const warnCalls: string[] = [];
+    const logger: Logger = {
+      debug: () => {},
+      info: () => {},
+      warn: (...args: unknown[]) => {
+        warnCalls.push(args.map((a) => String(a)).join(" "));
+      },
+      error: () => {},
+    };
+    return { logger, warnCalls };
+  }
+
+  it("阈值未配置（默认关闭）：即使 path 很长也不产生预算 warning", async () => {
+    const { logger, warnCalls } = recordingLogger();
+    const { session } = await bootSession(
+      "mockLlmLoop.ts",
+      [{ port: "CapabilityProvider", package: fixture("mockCapability.ts") }],
+      5,
+      { logger },
+    );
+
+    await session.sendMessage("go");
+
+    expect(warnCalls.some((m) => m.includes("message path"))).toBe(false);
+  });
+
+  it("阈值很小：run 中途触发且仅触发一次，不针对第一轮（turnIndex===0）", async () => {
+    const { logger, warnCalls } = recordingLogger();
+    const { session, events } = await bootSession(
+      "mockLlmLoop.ts",
+      [{ port: "CapabilityProvider", package: fixture("mockCapability.ts") }],
+      5,
+      { logger, contextBudgetWarnTokens: 1 },
+    );
+
+    await session.sendMessage("go");
+
+    const budgetWarnings = warnCalls.filter((m) => m.includes("message path"));
+    expect(budgetWarnings).toHaveLength(1);
+
+    const last = events[events.length - 1];
+    expect(last?.type).toBe("agent_end");
+    const turnIds = last?.type === "agent_end" ? last.turnIds : [];
+    expect(turnIds.length).toBeGreaterThan(1);
+    // 触发的 warning 不引用第一个 turnId（第一轮的历史预算不在本次观测范围内）。
+    expect(budgetWarnings[0]).not.toContain(turnIds[0]);
+  });
+
+  it("warning 不改变 history、事件数量与 sendMessage 返回的 newMessages（纯观察、零副作用）", async () => {
+    const { logger: withThresholdLogger } = recordingLogger();
+    const { session: withThreshold, events: eventsWithThreshold } = await bootSession(
+      "mockLlmLoop.ts",
+      [{ port: "CapabilityProvider", package: fixture("mockCapability.ts") }],
+      5,
+      { logger: withThresholdLogger, contextBudgetWarnTokens: 1 },
+    );
+    const newMessagesWithThreshold = await withThreshold.sendMessage("go");
+
+    // 第二个会话需要独立 workDir（同一 workDir 下 sessionId 不同不冲突，但用独立目录更干净、
+    // 不依赖 sessionId 隔离细节），不改写外层共享的 `workDir` 闭包变量以免影响 afterEach 清理。
+    const secondWorkDir = await mkdtemp(join(tmpdir(), "helios-loopfix-"));
+    try {
+      const manifest: Manifest = {
+        plugins: [
+          { port: "FileSystemPort", package: "@helios/fs-node" },
+          { port: "CapabilityProvider", package: fixture("mockCapability.ts") },
+          { port: "LLMProvider", package: fixture("mockLlmLoop.ts") },
+        ],
+      };
+      const { logger: withoutThresholdLogger } = recordingLogger();
+      const kernel = new Kernel({ workDir: secondWorkDir, manifest, logger: withoutThresholdLogger });
+      await kernel.start();
+      const eventsWithoutThreshold: AgentEvent[] = [];
+      const withoutThreshold = kernel.createSession({ askQuestion: noAsk, maxTurns: 5 });
+      withoutThreshold.on((e) => eventsWithoutThreshold.push(e));
+      const newMessagesWithoutThreshold = await withoutThreshold.sendMessage("go");
+
+      expect(eventsWithThreshold.map((e) => e.type)).toEqual(eventsWithoutThreshold.map((e) => e.type));
+      expect(withThreshold.getHistory().map((m) => m.role)).toEqual(
+        withoutThreshold.getHistory().map((m) => m.role),
+      );
+      expect(newMessagesWithThreshold.map((m) => m.role)).toEqual(
+        newMessagesWithoutThreshold.map((m) => m.role),
+      );
+    } finally {
+      await rm(secondWorkDir, { recursive: true, force: true });
+    }
   });
 });
