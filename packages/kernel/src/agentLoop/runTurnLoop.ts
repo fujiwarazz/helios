@@ -1,4 +1,12 @@
-import type { Message, LLMOptions, LLMProvider, RouteContext, RouteSignals } from "@helios/ports";
+import type {
+  Message,
+  LLMOptions,
+  LLMProvider,
+  RouteContext,
+  RouteSignals,
+  TaskOutcome,
+  TaskCostReport,
+} from "@helios/ports";
 import { uid } from "../ids";
 import { streamAssistant } from "./streamAssistant";
 import { executeTools } from "./executeTools";
@@ -8,6 +16,7 @@ import { approxTokens, pathHasCode, stableStringify } from "./canonical";
 import { computeRetryDelayMs, realSleep, DEFAULT_LLM_RETRY } from "./retryBackoff";
 import { normalizeLlmError } from "../errors";
 import { warnIfMessagePathExceeds } from "./contextBudget";
+import { dispatchRunStart, dispatchTurnStart, dispatchLLMResponse, dispatchRunEnd } from "./runtimeDispatch";
 
 export interface RunTurnLoopParams {
   /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
@@ -37,6 +46,8 @@ export interface RunTurnLoopResult {
   runError?: string;
   /** Bug 5：因达到 turn 上限（而非自然结束）退出。 */
   reachedMaxTurns: boolean;
+  /** run 收尾时 runtimes 产出的成本报告；无 Runtime 实现 onRunEnd 时为 undefined。 */
+  costReport?: TaskCostReport;
 }
 
 /**
@@ -47,7 +58,7 @@ export interface RunTurnLoopResult {
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
   const { deps, tree, turnIdPrefix, runId, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
   const { provider, toolRegistry, hooks, sessionId, workDir, logger, askQuestion, signal, events } = deps;
-  const { modelRouter, costMeter, toolCache, versionProvider, llmRegistry } = deps;
+  const { runtimes, llmRegistry } = deps;
   const retryOpts = deps.llmRetry ?? DEFAULT_LLM_RETRY;
   const sleep = deps.sleep ?? realSleep;
 
@@ -58,6 +69,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
   // Fix 3（可观测性）：每个 run 只记录一次上下文预算 warning，不是每个超阈值 turn 都记录。
   // 只活在本次函数调用的闭包里，run 结束即消失——不落盘、不进 Session，不违反"纯观察"目标。
   let contextBudgetWarned = false;
+  await dispatchRunStart(runtimes, runId);
 
   // 本 run 的路由信号累积（供 ModelRouter 每轮采集），随本 run 生命周期存在于闭包内。
   const routeState = {
@@ -84,7 +96,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const checkpointRef = await tree.snapshotCheckpoint(turnId);
     events.emit({ type: "turn_start", turnId });
 
-    // ModelRouter：每轮选 provider+model+参数（noop 返回 {} 即不改写）。
+    // Runtime.onTurnStart：每轮选 provider+model+参数（无 runtime 实现即 {}，不改写）。
     const path = tree.pathToHead();
 
     // Fix 3（可观测性）：只关心"run 中途因工具输出增长导致的超预算风险"，第一轮（turnIndex===0）
@@ -93,7 +105,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       contextBudgetWarned = warnIfMessagePathExceeds(path, turnId, deps.contextBudgetWarnTokens, logger);
     }
 
-    const decision = await modelRouter.route(buildRouteContext(sessionId, turnIndex, path, toolRegistry.list().length, routeState));
+    const decision = await dispatchTurnStart(runtimes, buildRouteContext(sessionId, turnIndex, path, toolRegistry.list().length, routeState));
     const effective: LLMOptions = {
       ...llmOptions,
       ...(decision.provider !== undefined ? { provider: decision.provider } : {}),
@@ -153,9 +165,9 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     const { assistantMsg, stopReason, toolUseBlocks, streamError, parseErrorIds, usage } = streamed;
     assistantMsg.turnId = turnId;
 
-    // CostMeter 计量（旁路观察）：有 usage 才记，noop 时为空操作。
+    // Runtime.onLLMResponse（旁路观察）：有 usage 才记，无 runtime 实现时为空操作。
     if (usage) {
-      costMeter.onLLMCall(runId, {
+      await dispatchLLMResponse(runtimes, runId, {
         provider: usedProvider.id,
         model: effective.model ?? "",
         usage,
@@ -193,9 +205,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         sessionId,
         toolCtx,
         events,
-        costMeter,
-        toolCache,
-        versionProvider,
+        runtimes,
         runId,
       });
       tree.appendNode(toolResultMsg);
@@ -226,7 +236,10 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     break;
   }
 
-  return { turnIds, runError, reachedMaxTurns: turnIndex >= maxTurns };
+  // Runtime.onRunEnd 收尾：记录任务结果并产出成本报告（无 runtime 实现 onRunEnd 时 costReport 为 undefined）。
+  const outcomeStatus: TaskOutcome["status"] = signal.aborted ? "cancelled" : runError ? "failure" : "success";
+  const costReport = await dispatchRunEnd(runtimes, runId, { status: outcomeStatus });
+  return { turnIds, runError, reachedMaxTurns: turnIndex >= maxTurns, costReport };
 }
 
 interface RouteSignalState {
