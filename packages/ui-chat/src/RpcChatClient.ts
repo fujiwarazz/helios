@@ -28,7 +28,10 @@ export class RpcChatClient implements IChatClient {
   }
 
   async sendMessage(text: string): Promise<void> {
-    await this.rpc.call("sendMessage", { text });
+    // sendMessage 在服务端语义上阻塞到"整轮 Agent 执行完"才 resolve(一轮可能有十几个工具调用,
+    // 耗时几十秒到几分钟),不能套用 RpcClient 面向普通短调用的默认超时(30s)。中止交给用户主动
+    // cancel()/断连事件流收口,这里禁用超时(timeoutMs:0)。
+    await this.rpc.call("sendMessage", { text }, { timeoutMs: 0 });
   }
 
   onEvent(cb: (e: AgentEvent) => void): () => void {
