@@ -1,0 +1,44 @@
+{
+  "name": "@helios/electron",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.ts",
+  "scripts": {
+    "build:preload": "esbuild electron/preload.ts --outfile=dist-electron/preload.cjs --bundle --platform=node --format=cjs --external:electron",
+    "electron:start": "NODE_OPTIONS=--import=tsx electron .",
+    "dev": "rm -rf dist && pnpm build:preload && concurrently -k -n renderer,electron -c green,magenta \"vite\" \"wait-on tcp:5174 && pnpm electron:start\"",
+    "build": "pnpm build:preload && vite build",
+    "start": "pnpm electron:start",
+    "preview": "pnpm build && pnpm start",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.electron.json --noEmit"
+  },
+  "dependencies": {
+    "@helios/ui-chat": "workspace:*",
+    "@helios/protocol": "workspace:*",
+    "@helios/host": "workspace:*",
+    "@helios/kernel": "workspace:*",
+    "@helios/ports": "workspace:*",
+    "@helios/fs-node": "workspace:*",
+    "@helios/llm-anthropic": "workspace:*",
+    "@helios/llm-openai": "workspace:*",
+    "@helios/memory-fs": "workspace:*",
+    "@helios/checkpoint-fs": "workspace:*",
+    "@helios/compact-default": "workspace:*",
+    "@helios/teams-mailbox": "workspace:*",
+    "@helios/capability-fs": "workspace:*",
+    "@helios/costmeter-default": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "vite": "^5.4.11",
+    "concurrently": "^9.1.0",
+    "electron": "^32.0.0",
+    "esbuild": "^0.24.0",
+    "wait-on": "^8.0.1"
+  }
+}

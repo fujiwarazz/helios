@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./theme.css": "./src/styles/theme.css",
+    "./chat.css": "./src/styles/chat.css"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

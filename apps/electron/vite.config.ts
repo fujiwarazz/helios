@@ -2,14 +2,12 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "node:path";
 
-// 别名把 @helios 包指向源码(TS),由 esbuild 直接转译。
-// ⚠️ 只走浏览器安全入口 @helios/protocol/browser,绝不引 @helios/protocol(会拉入 `ws`)。
-// ui-chat 对 @helios/kernel、@helios/ports 全是 `import type`,esbuild 剥离,不入 bundle。
-// ⚠️ "@helios/ui-chat" 必须用精确匹配(^...$):Vite alias 默认前缀匹配 + 直接拼接剩余路径,
-// 若不锚定精确匹配,"@helios/ui-chat/theme.css" 会被误配成 "index.ts 路径 + /theme.css"
-// (ENOTDIR)。theme.css/chat.css 走 package.json exports 声明的独立 subpath,单独配 alias。
+// 与 apps/web/vite.config.ts 同样的别名策略(alias 用精确匹配,subpath 单独配,避免
+// "@helios/ui-chat/theme.css" 被前缀匹配吃掉后错误拼接路径)。渲染进程端口用 5174,
+// 避免与 apps/web 的 5173 冲突(两个 app 可能同时开着对照调试)。
 export default defineConfig({
   root: __dirname,
+  server: { port: 5174, strictPort: true },
   plugins: [react()],
   resolve: {
     alias: [

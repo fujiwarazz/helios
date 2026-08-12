@@ -9,3 +9,9 @@ export type { RpcHandler } from "./server";
 export { RpcClient, RpcCallError } from "./client";
 export type { ConnectionState, RpcClientOptions } from "./client";
 export { browserWsClientTransport } from "./browserWsTransport";
+// electronTransport 不 import "electron"/"ws",纯结构化接口,浏览器(Electron 渲染进程)侧安全。
+export {
+  electronRendererTransport,
+  electronMainTransport,
+} from "./electronTransport";
+export type { ElectronIpcBridge } from "./electronTransport";

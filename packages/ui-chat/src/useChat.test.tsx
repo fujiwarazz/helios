@@ -142,6 +142,26 @@ describe("useChat", () => {
     expect(errMsg?.text).toBe("402 quota exceeded for user");
   });
 
+  it("tool_execution_end 自带 descriptor(服务端已用 ToolRenderer 算好)时优先于本地 renderTool 兜底", async () => {
+    const { client, emit } = makeMockClient();
+    const renderTool = () => ({ label: "本地兜底", status: "success" as const });
+    const { result } = renderHook(() => useChat(client, { renderTool }));
+
+    act(() => {
+      emit(msgStart);
+      emit(toolStart);
+      emit({
+        type: "tool_execution_end",
+        toolUseId: "u1",
+        output: "ok",
+        isError: false,
+        descriptor: { label: "服务端渲染", status: "success" },
+      });
+    });
+
+    expect(result.current.messages[0].tools[0].descriptor?.label).toBe("服务端渲染");
+  });
+
   it("挂载拉历史 → 重建视图", async () => {
     const history: Message[] = [
       { id: "h1", role: "user", content: "hi" },
