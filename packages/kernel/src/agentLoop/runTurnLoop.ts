@@ -7,6 +7,7 @@ import type { ToolResultRecord } from "../events";
 import { approxTokens, pathHasCode, stableStringify } from "./canonical";
 import { computeRetryDelayMs, realSleep, DEFAULT_LLM_RETRY } from "./retryBackoff";
 import { normalizeLlmError } from "../errors";
+import { warnIfMessagePathExceeds } from "./contextBudget";
 
 export interface RunTurnLoopParams {
   /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
@@ -54,6 +55,9 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
   let turnIndex = 0;
   let pendingLeadMessages = params.pendingLeadMessages;
   let runError: string | undefined;
+  // Fix 3（可观测性）：每个 run 只记录一次上下文预算 warning，不是每个超阈值 turn 都记录。
+  // 只活在本次函数调用的闭包里，run 结束即消失——不落盘、不进 Session，不违反"纯观察"目标。
+  let contextBudgetWarned = false;
 
   // 本 run 的路由信号累积（供 ModelRouter 每轮采集），随本 run 生命周期存在于闭包内。
   const routeState = {
@@ -82,6 +86,13 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
 
     // ModelRouter：每轮选 provider+model+参数（noop 返回 {} 即不改写）。
     const path = tree.pathToHead();
+
+    // Fix 3（可观测性）：只关心"run 中途因工具输出增长导致的超预算风险"，第一轮（turnIndex===0）
+    // 的历史预算属于 run-start compact 已覆盖的观测范围，不在这里重复检查。每 run 只记录一次。
+    if (turnIndex > 0 && !contextBudgetWarned) {
+      contextBudgetWarned = warnIfMessagePathExceeds(path, turnId, deps.contextBudgetWarnTokens, logger);
+    }
+
     const decision = await modelRouter.route(buildRouteContext(sessionId, turnIndex, path, toolRegistry.list().length, routeState));
     const effective: LLMOptions = {
       ...llmOptions,

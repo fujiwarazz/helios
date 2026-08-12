@@ -145,6 +145,9 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
   if (pre.decision === "deny") {
     output = `工具调用被 Hook 拒绝：${pre.reason ?? ""}`.trim();
     isError = true;
+    // 从未真正执行：start 展示模型原始请求 input（block.input），不是 pre.input（改写值），
+    // 因为不存在"最终生效输入"这个概念。
+    events.emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input: block.input });
     return finish();
   }
   if (pre.decision === "ask") {
@@ -159,6 +162,8 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
     if (ans.answers[0] !== "允许") {
       output = "工具调用被用户拒绝";
       isError = true;
+      // 同上：拒绝路径展示原始请求 input，而非 hook 可能已改写的值。
+      events.emit({ type: "tool_execution_start", toolUseId: block.id, name: block.name, input: block.input });
       return finish();
     }
   }

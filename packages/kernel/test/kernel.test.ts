@@ -8,21 +8,24 @@ import { Kernel, type Manifest } from "../src/index";
 import type { AgentEvent } from "../src/events";
 import { calls as hookCalls, behavior as hookBehavior } from "./fixtures/hookCaptureCapability";
 import { calls as llmCalls } from "./fixtures/mockLlmCapture";
+import { behavior as preToolUseBehavior } from "./fixtures/mockCapabilityPreToolUse";
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
 }
 
-function capturingLogger(): { logger: Logger; errors: string[]; infos: string[] } {
+function capturingLogger(): { logger: Logger; errors: string[]; infos: string[]; warns: string[] } {
   const errors: string[] = [];
   const infos: string[] = [];
+  const warns: string[] = [];
   return {
     errors,
     infos,
+    warns,
     logger: {
       debug: () => {},
       info: (...a) => infos.push(a.join(" ")),
-      warn: () => {},
+      warn: (...a) => warns.push(a.join(" ")),
       error: (...a) => errors.push(a.join(" ")),
     },
   };
@@ -37,6 +40,7 @@ beforeEach(async () => {
   hookBehavior.userPromptSubmit = undefined;
   hookBehavior.sessionStart = undefined;
   llmCalls.length = 0;
+  preToolUseBehavior.preToolUse = undefined;
   return async () => {
     await rm(workDir, { recursive: true, force: true });
   };
@@ -373,5 +377,28 @@ describe("HookConfigLoader —— 装配到 Kernel.start()", () => {
   it("无 hooks.json 时 start() 正常完成，行为不受影响", async () => {
     const { session } = await bootHookCaptureSession();
     expect(await session.sendMessage("hi")).toHaveLength(2);
+  });
+});
+
+describe("HookRunner 接线 —— Kernel 真实使用自定义 logger 记录 hook 异常", () => {
+  it("PreToolUse handler 抛异常：warning 进入 Kernel 构造时传入的自定义 logger（不是 no-op 默认值）", async () => {
+    preToolUseBehavior.preToolUse = () => {
+      throw new Error("boom-in-hook");
+    };
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("mockCapabilityPreToolUse.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmWithTool.ts") },
+      ],
+    };
+    const cap = capturingLogger();
+    const kernel = new Kernel({ workDir, manifest, logger: cap.logger });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    await session.sendMessage("go");
+
+    expect(cap.warns.some((w) => w.includes("PreToolUse") && w.includes("boom-in-hook"))).toBe(true);
   });
 });

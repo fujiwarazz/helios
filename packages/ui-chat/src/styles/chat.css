@@ -25,6 +25,15 @@
   color: var(--h-accent-ink);
 }
 
+.helios-compacting-banner {
+  font-size: var(--h-fs-sm);
+  text-align: center;
+  padding: var(--h-space-2);
+  background: var(--h-accent-weak);
+  color: var(--h-accent-ink);
+  border-bottom: 1px solid var(--h-border);
+}
+
 .helios-msg-list {
   flex: 1 1 auto;
   min-height: 0;

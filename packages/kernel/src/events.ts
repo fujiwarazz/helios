@@ -7,6 +7,13 @@ export type AgentEvent =
   | { type: "message_start"; messageId: string; role: Role; turnId: string }
   | { type: "message_update"; messageId: string; delta: StreamEvent }
   | { type: "message_end"; messageId: string; role: Role; stopReason?: StopReason }
+  /**
+   * `input` 语义按路径分层（兼容现有事件协议的临时约定，长期应拆成 `requestedInput`/
+   * `effectiveInput?` 两个字段，消除同名字段双语义）：
+   * - 正常执行路径：PreToolUse 改写后的最终执行输入；
+   * - deny / ask-reject / parse-error 三条路径：模型原始请求输入——这些调用从未真正执行，
+   *   不存在"最终生效输入"这个概念。
+   */
   | { type: "tool_execution_start"; toolUseId: string; name: string; input: unknown }
   | {
       type: "tool_execution_end";
