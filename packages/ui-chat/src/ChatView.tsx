@@ -212,6 +212,7 @@ export function ChatView({
   const {
     messages,
     isStreaming,
+    isCompacting,
     connection,
     send,
     stop,
@@ -241,6 +242,12 @@ export function ChatView({
       {connection !== "open" ? (
         <div data-testid="connection-banner" data-state={connection} className="helios-conn-banner">
           {connection === "connecting" ? "连接中…" : "连接已断开"}
+        </div>
+      ) : null}
+
+      {isCompacting ? (
+        <div data-testid="compacting-banner" className="helios-compacting-banner">
+          正在整理历史记录…
         </div>
       ) : null}
 

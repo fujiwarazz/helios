@@ -31,9 +31,11 @@ export type RenderTool = (
 export interface ChatState {
   messages: ChatMessageView[];
   isStreaming: boolean;
+  /** run 开始前的历史压缩阶段是否在进行中（同步阻塞，见 compact_start/compact_end）。 */
+  isCompacting: boolean;
 }
 
-export const initialState: ChatState = { messages: [], isStreaming: false };
+export const initialState: ChatState = { messages: [], isStreaming: false, isCompacting: false };
 
 function findTool(
   messages: ChatMessageView[],
@@ -79,6 +81,12 @@ export function reduce(
   switch (event.type) {
     case "agent_start":
       return { ...state, isStreaming: true };
+
+    case "compact_start":
+      return { ...state, isCompacting: true };
+
+    case "compact_end":
+      return { ...state, isCompacting: false };
 
     case "message_start": {
       if (state.messages.some((m) => m.id === event.messageId)) return state;
@@ -293,6 +301,8 @@ export function markRunBoundaries(views: ChatMessageView[]): ChatMessageView[] {
 export interface UseChatResult {
   messages: ChatMessageView[];
   isStreaming: boolean;
+  /** run 开始前的历史压缩阶段是否在进行中（同步阻塞：此时 sendMessage 尚未真正发起 LLM 请求）。 */
+  isCompacting: boolean;
   connection: ConnectionState;
   send: (text: string) => Promise<void>;
   /** 中断当前 run（Stop 按钮）。client 不支持则为 no-op。 */
@@ -409,6 +419,7 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
   return {
     messages: state.messages,
     isStreaming: state.isStreaming,
+    isCompacting: state.isCompacting,
     connection,
     send,
     stop,

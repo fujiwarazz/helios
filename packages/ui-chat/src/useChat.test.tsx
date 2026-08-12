@@ -72,6 +72,20 @@ describe("useChat", () => {
     expect(result.current.isStreaming).toBe(false);
   });
 
+  it("compact_start/compact_end 翻转 isCompacting", () => {
+    const { client, emit } = makeMockClient();
+    const { result } = renderHook(() => useChat(client));
+
+    act(() => emit(runStart));
+    expect(result.current.isCompacting).toBe(false);
+
+    act(() => emit({ type: "compact_start", messageCount: 20 }));
+    expect(result.current.isCompacting).toBe(true);
+
+    act(() => emit({ type: "compact_end", summaryLength: 42, remaining: 5 }));
+    expect(result.current.isCompacting).toBe(false);
+  });
+
   it("connection 随 onState 变化", () => {
     const { client, setState } = makeMockClient();
     const { result } = renderHook(() => useChat(client));
