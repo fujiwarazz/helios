@@ -6,9 +6,15 @@
 
 import { WebSocketServer, type WebSocket as NodeWebSocket } from "ws";
 import type { IncomingMessage } from "node:http";
-import type { AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
+import type { AskQuestionRequest, AskQuestionResponse, Disposable } from "@helios/ports";
 import type { Kernel, Session, AgentEvent } from "@helios/kernel";
-import { RpcServer, nodeWsServerTransport, type Transport } from "@helios/protocol";
+import {
+  RpcServer,
+  nodeWsServerTransport,
+  electronMainTransport,
+  type Transport,
+  type ElectronIpcBridge,
+} from "@helios/protocol";
 
 /**
  * 每连接一个交互式审批器：AskUserQuestion 走这里 → 广播 ask 事件给前端 →
@@ -70,9 +76,38 @@ function createApprovals(): Approvals {
 }
 
 /**
+ * 给 `tool_execution_end` 事件补上服务端算好的渲染描述符：
+ * 查 `kernel.getRenderer(name)`（该工具对应的 CapabilityProvider 若注册了 ToolRenderer）算出
+ * `ToolRenderDescriptor`，附到事件上随广播下发——两端 UI 直接展示，不必各自维护渲染分支。
+ * 未命中（该工具没注册渲染器）时原样返回事件，消费端走本地通用兜底。
+ * `toolNames`：本连接内 toolUseId → name 的映射，从 `tool_execution_start` 记录、
+ * `tool_execution_end` 时查出并清理（避免长连接下无限增长）。
+ */
+function attachToolDescriptor(
+  kernel: Kernel,
+  toolNames: Map<string, string>,
+  e: AgentEvent,
+): AgentEvent {
+  if (e.type === "tool_execution_start") {
+    toolNames.set(e.toolUseId, e.name);
+    return e;
+  }
+  if (e.type === "tool_execution_end") {
+    const name = toolNames.get(e.toolUseId);
+    toolNames.delete(e.toolUseId);
+    const renderer = name ? kernel.getRenderer(name) : undefined;
+    if (!renderer) return e;
+    const status = e.isError ? "error" : "success";
+    return { ...e, descriptor: renderer.render(undefined, status, e.output) };
+  }
+  return e;
+}
+
+/**
  * 把一个 Session 绑到给定 transport 上:建 RpcServer + 注册 handlers + 事件广播。
  * 断开时解绑事件监听(否则重连累积监听 → 事件重复广播)。
- * 传入 kernel 以注册内核级只读 RPC（sessions.list / ports.list）。
+ * 传入 kernel 以注册内核级只读 RPC（sessions.list / ports.list）+ 按工具名查
+ * ToolRenderer（见 attachToolDescriptor）。
  * 传入 approvals 以打通交互式审批（answerQuestion RPC + ask 广播）。
  */
 export function bindSession(
@@ -97,8 +132,9 @@ export function bindSession(
     (channel, payload) => server.broadcast(channel, payload, session.id),
     session.id,
   );
+  const toolNames = new Map<string, string>();
   const unbindEvents = session.on((e: AgentEvent) =>
-    server.broadcast(`session:${session.id}`, e, session.id),
+    server.broadcast(`session:${session.id}`, attachToolDescriptor(kernel, toolNames, e), session.id),
   );
   const closeSub = transport.onClose(() => unbindEvents());
   return {
@@ -205,4 +241,71 @@ export function serveKernelOverWs(opts: ServeOptions): Promise<ServeHandle> {
       });
     });
   });
+}
+
+export interface ElectronConnectRequest {
+  connectionId: string;
+  /** 有则 resume 该历史会话，无则新建（与 serveKernelOverWs 的 `?session=` 语义一致）。 */
+  resumeSessionId?: string;
+}
+
+export interface ServeElectronIpcOptions {
+  kernel: Kernel;
+  /**
+   * 该 Electron 应用（通常单窗口）用来跟渲染进程收发帧的 bridge，由调用方（apps/electron
+   * 的 main.ts）包一层真实 ipcMain/webContents 传入——host 包本身不 import "electron"，
+   * 只认 `@helios/protocol` 定义的这个结构化接口（与 electronMainTransport 消费的是同一个）。
+   */
+  bridge: ElectronIpcBridge;
+  /**
+   * 订阅"渲染进程发起新连接请求"：调用方把真实 `ipcMain.handle('helios:connect', ...)` 接到
+   * 这里，每次收到请求就调一次 handler；handler 返回的 Promise 会话就绪后才 resolve，
+   * 调用方据此让 `ipcMain.handle` 的返回值（ack）延迟到绑定完成——渲染进程的 `connect()`
+   * 调用因此天然等到 host 侧准备好才返回，不需要 serveKernelOverWs 那套"缓冲早到消息"的兜底
+   * （Electron IPC 请求/响应本身就是可靠有序的）。
+   */
+  onConnect(handler: (req: ElectronConnectRequest) => Promise<void>): Disposable;
+  /** 每个连接如何建会话。默认每连接一个新会话（对齐 valos"一远程一会话"）。 */
+  createSession?: (kernel: Kernel) => Session;
+  /** 工具审批回调;显式提供则覆盖默认的交互式审批（如测试自动放行）。 */
+  askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
+}
+
+export interface ElectronIpcServeHandle {
+  dispose(): void;
+}
+
+/**
+ * 起一个 Electron IPC 宿主：每个"连接请求"（渲染进程新建/切会话时发起）绑一个 Kernel Session。
+ * 与 `serveKernelOverWs` 同构（连接受理循环 + transport 包装 + `bindSession`），只是受理方式
+ * 从 WS 的 `connection` 事件换成 `onConnect` 订阅——`bindSession` 本身零改动、直接复用。
+ */
+export function serveKernelOverElectronIpc(opts: ServeElectronIpcOptions): ElectronIpcServeHandle {
+  const bindings = new Map<string, { dispose(): void }>();
+
+  const connectSub = opts.onConnect(async ({ connectionId, resumeSessionId }) => {
+    const approvals = createApprovals();
+    const askQuestion = opts.askQuestion ?? approvals.askQuestion;
+    const createSession = opts.createSession ?? ((k: Kernel) => k.createSession({ askQuestion }));
+    const session = resumeSessionId
+      ? await opts.kernel.resumeSession(resumeSessionId, { askQuestion })
+      : createSession(opts.kernel);
+
+    const transport = electronMainTransport(opts.bridge, connectionId);
+    const binding = bindSession(session, transport, opts.kernel, approvals);
+    bindings.set(connectionId, binding);
+    // 连接关闭（渲染进程主动 close 或窗口销毁）时解绑，避免残留 Session 监听。
+    transport.onClose(() => {
+      binding.dispose();
+      bindings.delete(connectionId);
+    });
+  });
+
+  return {
+    dispose(): void {
+      connectSub.dispose();
+      for (const b of bindings.values()) b.dispose();
+      bindings.clear();
+    },
+  };
 }

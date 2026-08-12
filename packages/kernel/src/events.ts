@@ -1,4 +1,4 @@
-import type { Message, StreamEvent, StopReason, Role, TaskCostReport } from "@helios/ports";
+import type { Message, StreamEvent, StopReason, Role, TaskCostReport, ToolRenderDescriptor } from "@helios/ports";
 
 /** 分层事件协议：agent_start → (turn_start → message_* → tool_execution_* → turn_end)+ → agent_end */
 export type AgentEvent =
@@ -8,7 +8,18 @@ export type AgentEvent =
   | { type: "message_update"; messageId: string; delta: StreamEvent }
   | { type: "message_end"; messageId: string; role: Role; stopReason?: StopReason }
   | { type: "tool_execution_start"; toolUseId: string; name: string; input: unknown }
-  | { type: "tool_execution_end"; toolUseId: string; output: unknown; isError: boolean }
+  | {
+      type: "tool_execution_end";
+      toolUseId: string;
+      output: unknown;
+      isError: boolean;
+      /**
+       * 服务端算好的渲染描述符（由 host 用 kernel.getRenderer(name) 命中 CapabilityProvider
+       * 注册的 ToolRenderer 算出）。有值时消费端应优先使用；未命中（该工具没注册渲染器）时
+       * 为 undefined，由消费端走本地通用兜底。不是所有事件来源都会填充此字段（如历史重放）。
+       */
+      descriptor?: ToolRenderDescriptor;
+    }
   | { type: "turn_end"; turnId: string; toolResults: ToolResultRecord[] }
   /** LLM 调用命中可重试错误、即将 backoff 重试（issue #10）；供消费方感知"正在重试"、可选择丢弃上一次失败 attempt 的部分渲染。 */
   | { type: "llm_retry"; turnId: string; retryCount: number; delayMs: number; httpStatus?: number }

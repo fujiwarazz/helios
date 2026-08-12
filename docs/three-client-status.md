@@ -8,8 +8,9 @@
 |---|---|---|
 | `@helios/protocol` | 领域无关的极简 JSON-RPC（envelope 编解码 + 请求-响应配对 + 事件多路复用 + 断线重连）+ 可替换 Transport 抽象 + WebSocket 传输 | ✅ 完成 |
 | `@helios/ui-chat` | 极简 React 对话渲染库（消息流 + 工具卡片 + 输入框 + 连接状态条）+ `IChatClient` 契约 + `RpcChatClient` | ✅ 完成 |
-| `@helios/host` | Kernel Session ↔ protocol RpcServer 的领域适配层（`bindSession` + `serveKernelOverWs`），对应 valos Electron 的 RemoteControlServer | ✅ 完成 |
+| `@helios/host` | Kernel Session ↔ protocol RpcServer 的领域适配层（`bindSession` + `serveKernelOverWs` + `serveKernelOverElectronIpc`），对应 valos Electron 的 RemoteControlServer | ✅ 完成 |
 | `apps/web` | 浏览器客户端（Vite+React）+ Node WS 宿主 runner（`server/host.ts`），对应 valos-web | ✅ 完成 |
+| `apps/electron` | Electron 桌面客户端：主进程内直连起 Kernel + `serveKernelOverElectronIpc`，渲染进程走 `@helios/protocol` 的 `ElectronIpcBridge`，对应 valos-view（Electron 渲染层） | ✅ 完成（简化版：单窗口，不含打包/自动更新） |
 
 ### 浏览器安全入口（node/browser 传输隔离）
 
@@ -30,14 +31,16 @@
 | `nodeWsServerTransport(ws)` | 服务端把已 accept 的连接包成 Transport | ✅ 本期 |
 | `nodeWsClientTransport(url)` | node 宿主 / 测试客户端 | ✅ 本期 |
 | `browserWsClientTransport(url)` | 浏览器宿主客户端 | ✅ 本期 |
-| `ElectronIpcTransport` | electron main ↔ renderer（把 `ipcRenderer`/`ipcMain` 包成 Transport） | ⏳ 未做 |
+| `ElectronIpcTransport` | electron main ↔ renderer（把 `ipcRenderer`/`ipcMain` 包成 Transport） | ✅ 本期（`electronRendererTransport`/`electronMainTransport`，共享同一份 `ElectronIpcBridge` 包装逻辑；按 connectionId 多路复用；不 import `electron`，结构化接口，真实 ipcMain/webContents 接线留在 `apps/electron`） |
 | `InProcessTransport` | cli 同进程（连 WS 都不用，直接内存双向管道） | ⏳ 未做 |
 
 新增一个传输只需实现 `Transport` 接口，协议 / RpcServer / RpcClient / ui-chat 全部零改动。
 
 ## Session ↔ RPC 胶水（已落地为 `@helios/host`）
 
-协议本体不含"Session 绑定"（保持通用）。这段领域胶水现已抽成可复用的 `@helios/host`（`bindSession` + `serveKernelOverWs`），apps/web 宿主与测试共用，将来 apps/electron 直接复用：
+协议本体不含"Session 绑定"（保持通用）。这段领域胶水现已抽成可复用的 `@helios/host`（`bindSession` +
+`serveKernelOverWs` + `serveKernelOverElectronIpc`），apps/web 与 apps/electron 两个宿主共用同一份
+`bindSession`（连接受理方式不同，绑定逻辑零改动）：
 
 ```ts
 // @helios/host: bindSession —— 每个连接绑一个 Session
@@ -53,12 +56,28 @@ transport.onClose(() => unbind());  // 断开必须解绑,否则重连累积监�
 
 客户端侧用 `RpcChatClient(rpcClient)` 实现 `IChatClient`，直接喂给 `<ChatView client={...} />`。
 
+### 工具卡片渲染:接上已有的 `ToolRenderer` 注册表
+
+`@helios/ports` 早就定义了 `ToolRenderer{toolName, render()}` + `CapabilityProvider.getRenderers?()`，
+`kernel.getRenderer(name)` 也早就把它们收进注册表，但一直没人调用。`bindSession` 现在在广播
+`tool_execution_end` 事件前，用一个连接级 `toolUseId → name` 映射查出工具名，命中 `kernel.getRenderer`
+就把算好的 `ToolRenderDescriptor` 附到事件的 `descriptor` 字段上随事件下发。两端 UI（`@helios/ui-chat`
+的 `useChat`）优先用事件自带的 `descriptor`，未命中才落回本地通用兜底——新增一个工具的专属渲染
+样式，只需在其 `CapabilityProvider.getRenderers()` 里注册，`apps/web`/`apps/electron` 零改动同步生效。
+
 ## 端到端跑法（apps/web，需真实本地模型网关）
 
 1. 起本地模型网关（`127.0.0.1:8788`，见根 `helios.config.json` 的 `llm-anthropic`）。
 2. `pnpm -C <helios> --filter @helios/web host`（Node WS 宿主，默认 8787；可 `HELIOS_WEB_PORT` 覆盖）。
 3. `pnpm -C <helios> --filter @helios/web dev`（Vite，:5173）。
 4. 浏览器开 `http://localhost:5173/?ws=ws://localhost:8787` → 对话；断开宿主 → 顶部状态条"已断开"，恢复自动重连。
+
+## 端到端跑法（apps/electron，需真实本地模型网关）
+
+1. 起本地模型网关（同上，见根 `helios.config.json`）。
+2. `pnpm -C <helios> --filter @helios/electron dev`（先 esbuild 出 `dist-electron/main.js`+`preload.cjs`，
+   再并行起 Vite（:5174）+ `electron .`；主进程内直连起 Kernel，不监听端口，不经 WebSocket）。
+3. 窗口内直接对话；侧边栏/工具卡片/流式渲染与 web 端行为一致（共用同一份 `@helios/ui-chat`）。
 
 ## ui-chat 待补清单（本期极简，不追求样式打磨）
 
@@ -76,6 +95,11 @@ transport.onClose(() => unbind());  // 断开必须解绑,否则重连累积监�
 
 ## 下一步
 
-1. `apps/electron`：实现 `ElectronIpcTransport`，复用 `@helios/host`（`bindSession`）+ `ui-chat`。
-2. 视需要补全 ui-chat 待补清单里的能力（审批 UI、虚拟列表、历史分页等）。
-3. `apps/web` 可选增强：连接 URL 交互输入、多会话切换、断连补发（seq 已留位）。
+1. 视需要补全 ui-chat 待补清单里的能力（审批 UI、虚拟列表、历史分页等）。
+2. `apps/web` 可选增强：连接 URL 交互输入、多会话切换、断连补发（seq 已留位）。
+3. **多后端扩展位（Local/SSH 远程/云主机，本期只做 Local，不实现）**：`serveKernelOverWs` 已经是
+   "在任意 Node 进程里起一个 WS 宿主"的通用胶水（`apps/web/server/host.ts` 就是证明）。未来要支持
+   "远程 SSH 主机"后端，只需在远程主机上跑同一个 `serveKernelOverWs`（现成代码），`apps/electron`
+   渲染进程侧新增一种 `createTransport`（连远程 WS 而非本机 Electron IPC）即可——`ui-chat`/`kernel`/
+   `bindSession` 全部不用动，甚至壳层（`App.tsx`/`Sidebar`）也不用动，只改壳层里构造 transport
+   的那一行。`Transport` 接口 + `bindSession` 解耦已经把这个位置留好了。

@@ -1,0 +1,70 @@
+/* ==========================================================================
+ * packages/ui-chat/src/styles/theme.css
+ * 设计 token(Anthropic 暖白体系,浅色) + 全局重置。
+ * 单一源头:web/electron 等所有消费 @helios/ui-chat 的宿主共用同一份色板/字号/间距,
+ * 避免各宿主各改各的导致视觉漂移(对齐 valos `valos-theme.css` 的做法)。
+ * 应用外壳级样式(侧边栏/导航/会话列表/占位页等)不在此文件,归属各宿主自己维护。
+ * ========================================================================== */
+
+:root {
+  /* 色板 —— 暖白底 / 近黑字 / 陶土强调,克制使用 */
+  --h-bg: #faf7f0;
+  --h-surface: #fffdf8;
+  --h-sidebar: #f5f1e8;
+  --h-text: #1a1a18;
+  --h-text-muted: #6b6b63;
+  --h-text-faint: #9a9a90;
+  --h-border: #e8e1d4;
+  --h-border-strong: #d8cfbe;
+  --h-accent: #c15f3c;
+  --h-accent-ink: #a44e30;
+  --h-accent-weak: #f3e3da;
+  --h-ok: #4a7c59;
+  --h-error: #b3402e;
+  --h-error-weak: #f5e0da;
+
+  /* 字号 */
+  --h-fs-xs: 11px;
+  --h-fs-sm: 13px;
+  --h-fs-base: 15px;
+  --h-fs-lg: 18px;
+  --h-fs-xl: 22px;
+
+  /* 间距 */
+  --h-space-1: 4px;
+  --h-space-2: 8px;
+  --h-space-3: 12px;
+  --h-space-4: 16px;
+  --h-space-5: 24px;
+  --h-space-6: 32px;
+
+  /* 圆角 */
+  --h-radius-sm: 4px;
+  --h-radius-md: 6px;
+  --h-radius-lg: 8px;
+
+  /* 版心 */
+  --h-content-max: 760px;
+
+  --h-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --h-font-mono: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: var(--h-font);
+  color: var(--h-text);
+  background: var(--h-bg);
+  font-size: var(--h-fs-base);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}

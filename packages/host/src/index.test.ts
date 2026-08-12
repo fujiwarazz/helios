@@ -73,6 +73,37 @@ describe("@helios/host serveKernelOverWs —— 客户端驱动真实 Kernel Ses
   });
 });
 
+describe("@helios/host serveKernelOverWs —— 工具渲染描述符（ToolRenderer 注册表接线）", () => {
+  it("工具注册了 ToolRenderer 时，tool_execution_end 广播事件带上服务端算好的 descriptor", async () => {
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "CapabilityProvider", package: fixture("mockCapabilityWithRenderer.ts") },
+        { port: "LLMProvider", package: fixture("mockLlmWithTool.ts") },
+      ],
+    };
+    const kernel = new Kernel({ workDir, manifest, logger: silent });
+    await kernel.start();
+    const localHandle = await serveKernelOverWs({ kernel, port: 0 });
+
+    const url = `ws://127.0.0.1:${localHandle.port}`;
+    const rpc = new RpcClient(() => nodeWsClientTransport(url));
+    const sessionId = (await rpc.call("sessionId")) as string;
+
+    const events: AgentEvent[] = [];
+    rpc.on(`session:${sessionId}`, (payload) => events.push(payload as AgentEvent));
+    await rpc.call("sendMessage", { text: "go" }, { timeoutMs: 15_000 });
+    await waitFor(() => events.some((e) => e.type === "agent_end"), 5_000);
+
+    const end = events.find((e) => e.type === "tool_execution_end");
+    expect(end).toBeTruthy();
+    expect(end).toMatchObject({ descriptor: { label: "Echo(success)", status: "success" } });
+
+    rpc.close();
+    await localHandle.close();
+  });
+});
+
 describe("@helios/host serveKernelOverWs —— 连接关闭触发 SessionEnd", () => {
   it("客户端断开连接后，绑定的 Session.dispose() 被调用，SessionEnd handler 收到通知", async () => {
     hookCalls.length = 0;

@@ -20,7 +20,11 @@ import type {
   AskQuestion,
 } from "./types";
 
-/** 可选的工具渲染器:把工具名/入参/状态/输出映射成结构化描述。 */
+/**
+ * 本地兜底工具渲染器:仅当事件没有携带服务端算好的 `descriptor`(host 用
+ * `kernel.getRenderer(name)` 命中 CapabilityProvider 注册的 ToolRenderer 算出,见
+ * `@helios/host` 的 `bindSession`)时才会被调用——即该工具没有注册专属渲染器的通用兜底。
+ */
 export type RenderTool = (
   name: string,
   input: unknown,
@@ -152,7 +156,8 @@ export function reduce(
       const status: ToolStatus = event.isError ? "error" : "success";
       const hit = findTool(state.messages, event.toolUseId);
       if (hit) {
-        const descriptor = renderTool?.(hit.tool.name, undefined, status, event.output);
+        // 服务端已算好 descriptor(该工具注册了 ToolRenderer)则直接用;否则走本地兜底。
+        const descriptor = event.descriptor ?? renderTool?.(hit.tool.name, undefined, status, event.output);
         return {
           ...state,
           messages: state.messages.map((m) =>
@@ -168,7 +173,7 @@ export function reduce(
         };
       }
       // 容忍乱序:end 早于 start → 预建一张已完成卡片挂到最后 assistant。
-      const descriptor = renderTool?.("", undefined, status, event.output);
+      const descriptor = event.descriptor ?? renderTool?.("", undefined, status, event.output);
       const card: ToolCallView = { id: event.toolUseId, name: "", status, descriptor };
       const owner = lastAssistant(state.messages);
       if (owner) {

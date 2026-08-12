@@ -1,18 +1,15 @@
-// apps/web/src/App.tsx —— 浏览器客户端外壳。
-// 注入 client 时(测试)直接渲染 ChatView;否则起完整外壳:侧边栏 + 会话持久化 + 页面路由。
+// apps/electron/src/App.tsx —— Electron 渲染进程外壳。
+// 与 apps/web/src/App.tsx 同构,唯一区别是连接建立方式:web 走 browserWsClientTransport(WS),
+// 这里走 connectElectronTransport(Electron IPC,见 ../electronRpc.ts)。壳层(Sidebar/pages/
+// 状态管理)是各自维护的独立文件,不建立共享依赖(见计划文档"UI 下沉边界"一节)。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChatView, RpcChatClient, type IChatClient, type ConnectionState } from "@helios/ui-chat";
-import { RpcClient, browserWsClientTransport } from "@helios/protocol/browser";
+import { RpcClient } from "@helios/protocol/browser";
 import { Sidebar, type NavView } from "./components/Sidebar";
 import { Placeholder } from "./pages/Placeholder";
 import { PortsPage } from "./pages/PortsPage";
-import {
-  wsUrlFor,
-  listSessions,
-  listPorts,
-  type SessionMetaView,
-  type PortInfoView,
-} from "./lib/rpc";
+import { connectElectronTransport } from "./electronRpc";
+import { listSessions, listPorts, type SessionMetaView, type PortInfoView } from "./lib/rpc";
 
 // 工具卡片渲染不在这里写:大多数工具的 descriptor 已由 host 用 kernel.getRenderer(name)
 // 算好随事件下发（见 @helios/host bindSession），ChatView 不传 renderTool 时对没注册渲染器
@@ -33,7 +30,7 @@ function saveActiveSession(id: string | undefined): void {
     if (id) window.localStorage.setItem(ACTIVE_SESSION_KEY, id);
     else window.localStorage.removeItem(ACTIVE_SESSION_KEY);
   } catch {
-    /* localStorage 不可用（隐私模式等）：忽略，退化为刷新丢会话 */
+    /* localStorage 不可用:忽略,退化为刷新丢会话 */
   }
 }
 
@@ -48,7 +45,6 @@ function InjectedApp({ client }: { client: IChatClient }): JSX.Element {
 
 function ManagedApp(): JSX.Element {
   // activeSessionId=undefined 表示"新会话"(host 新建);切换时置为目标 id 触发重连。
-  // 初值从 localStorage 恢复，使刷新后 resume 同一会话而非新建空会话。
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>(loadActiveSession);
   // nonce:即使 id 不变(New chat 连续点)也强制重建 client。
   const [nonce, setNonce] = useState(0);
@@ -62,7 +58,7 @@ function ManagedApp(): JSX.Element {
 
   // 每个 activeSessionId/nonce 组合建一条新连接。effect 内建、cleanup 内关。
   useEffect(() => {
-    const client = new RpcClient(() => browserWsClientTransport(wsUrlFor(activeSessionId)));
+    const client = new RpcClient(() => connectElectronTransport(activeSessionId));
     setRpc(client);
     setConnection("connecting");
     const sub = client.onState((s) => setConnection(s));

@@ -13,3 +13,8 @@ export {
   nodeWsClientTransport,
   browserWsClientTransport,
 } from "./wsTransport";
+export {
+  electronRendererTransport,
+  electronMainTransport,
+} from "./electronTransport";
+export type { ElectronIpcBridge } from "./electronTransport";
