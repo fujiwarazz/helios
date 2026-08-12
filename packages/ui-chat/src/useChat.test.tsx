@@ -86,6 +86,37 @@ describe("useChat", () => {
     expect(result.current.isCompacting).toBe(false);
   });
 
+  it("agent_end 兜底复位 isCompacting（compact_start 后未收到 compact_end 就以 run 错误收尾）", () => {
+    const { client, emit } = makeMockClient();
+    const { result } = renderHook(() => useChat(client));
+
+    act(() => {
+      emit(runStart);
+      emit({ type: "compact_start", messageCount: 20 });
+    });
+    expect(result.current.isCompacting).toBe(true);
+
+    act(() => emit({ type: "agent_end", runId: "r1", turnIds: [], newMessages: [], error: "boom" }));
+    expect(result.current.isCompacting).toBe(false);
+  });
+
+  it("compact() 抛错致 sendMessage() 直接 reject → isCompacting 随 isStreaming 一并复位", async () => {
+    // 模拟 kernel 侧 maybeCompact() 无 try/catch：emit compact_start 后直接向上抛，
+    // 不会有 compact_end/agent_end 事件来兜底，只能靠 send() 的 catch 分支复位。
+    const { client, emit } = makeMockClient([], async () => {
+      emit({ type: "compact_start", messageCount: 20 });
+      throw new Error("compact strategy failed");
+    });
+    const { result } = renderHook(() => useChat(client));
+
+    await act(async () => {
+      await result.current.send("hi");
+    });
+
+    expect(result.current.isCompacting).toBe(false);
+    expect(result.current.isStreaming).toBe(false);
+  });
+
   it("connection 随 onState 变化", () => {
     const { client, setState } = makeMockClient();
     const { result } = renderHook(() => useChat(client));

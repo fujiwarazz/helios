@@ -214,7 +214,9 @@ export function reduce(
       const messages = event.error
         ? appendErrorMessage(state.messages, `error-${event.runId}`, event.error)
         : state.messages;
-      return { ...state, messages: markRunBoundaries(messages), isStreaming: false };
+      // compact() 若抛错，maybeCompact() 内只 emit 了 compact_start（无 compact_end）就向上抛，
+      // isCompacting 会永久卡 true；agent_end 是该 run 的终态兜底，一并复位。
+      return { ...state, messages: markRunBoundaries(messages), isStreaming: false, isCompacting: false };
     }
 
     default:
@@ -384,12 +386,15 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
       try {
         await client.sendMessage(t);
       } catch (err) {
-        // sendMessage() 在 run 未优雅收尾前意外 throw（如非预期异常/连接中断）：
-        // 没有 agent_end 事件会来，isStreaming 会永久卡在 true，这里强制复位并给出提示。
+        // sendMessage() 在 run 未优雅收尾前意外 throw（如非预期异常/连接中断/compact() 抛错——
+        // kernel 侧 maybeCompact() 无 try/catch，只 emit 了 compact_start 就直接向上抛，
+        // 不会有 agent_end 事件来兜底）：没有事件会来，isStreaming/isCompacting 都会永久卡在
+        // true，这里强制复位并给出提示。
         const message = err instanceof Error ? err.message : String(err);
         setState((s) => ({
           ...s,
           isStreaming: false,
+          isCompacting: false,
           messages: appendErrorMessage(s.messages, `error-send-${Date.now()}`, message),
         }));
       }
