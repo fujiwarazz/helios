@@ -1,4 +1,3 @@
-import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 // 代码高亮主题由 @helios/ui-chat 的 Markdown 组件自带引入(highlight.js 是其直接依赖)。
@@ -12,8 +11,11 @@ import "./styles/shell.css";
 const root = document.getElementById("root");
 if (!root) throw new Error("找不到 #root 挂载点");
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// ⚠️ 不用 <StrictMode>:App.tsx 里建立连接的 effect 会 new RpcClient(...),其构造函数同步
+// 触发真实副作用(WS/IPC connect + 后端 session resume)。StrictMode dev 模式下"挂载→清理→
+// 再挂载"的双调用会导致同一 session 被 resume 两次(electron 端实测复现:同一 sessionId
+// 打印两条 resume 日志),且两个 RpcClient 短暂并存期间,Sidebar/ChatView 两处独立的
+// connection 状态订阅可能锁定到不同实例上,出现"已连接"与"连接已断开"同屏矛盾的界面表现。
+// RpcClient 的连接生命周期目前是"构造即连接",不是可安全重复调用的惰性资源,在这层做好
+// cancel 语义前不引入 StrictMode。
+createRoot(root).render(<App />);
