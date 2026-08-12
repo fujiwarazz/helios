@@ -65,6 +65,11 @@ export interface RunLoopDeps {
   llmRetry?: LlmRetryOptions;
   /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待；缺省用 {@link realSleep}。 */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * 上下文预算可观测性阈值（估算 token 数）：run 中途 message path 估算值超过该阈值时记录一次
+   * warning（不触发压缩，纯观察）。不传则不检查，默认关闭。见 {@link ./contextBudget.ts}。
+   */
+  contextBudgetWarnTokens?: number;
 }
 
 /**

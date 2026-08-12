@@ -43,6 +43,8 @@ export interface SessionOptions {
   llmRetry?: LlmRetryOptions;
   /** 重试等待的注入点，测试可传瞬时 resolve 避免真实等待。 */
   sleep?: (ms: number) => Promise<void>;
+  /** 上下文预算可观测性阈值；不传则不检查。见 `agentLoop/contextBudget.ts`。 */
+  contextBudgetWarnTokens?: number;
 }
 
 /** 会话元数据，落 `<workDir>/.helios/sessions/<id>/meta.json`，供列表展示与 resume。 */
@@ -300,6 +302,7 @@ export class Session {
         llmRegistry: ports.llm,
         llmRetry: this.opts.llmRetry,
         sleep: this.opts.sleep,
+        contextBudgetWarnTokens: this.opts.contextBudgetWarnTokens,
       },
       tree: {
         appendNode: (msg) => this.appendNode(msg),
