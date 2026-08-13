@@ -194,10 +194,15 @@ export async function loadPlugins(
 }
 
 function isDisposable(value: unknown): value is { dispose(): void | Promise<void> } {
+  const dispose =
+    typeof value === "object" && value !== null
+      ? (value as { dispose?: unknown }).dispose
+      : undefined;
   return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as { dispose?: unknown }).dispose === "function"
+    typeof dispose === "function" &&
+    // Some ports expose handle-scoped cleanup as dispose(handle). It is not a
+    // plugin lifecycle hook and must never be invoked without its resource.
+    dispose.length === 0
   );
 }
 
