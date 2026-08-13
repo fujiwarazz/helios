@@ -39,6 +39,7 @@
       "@helios/router-default": ["./packages/router-default/src/index.ts"],
       "@helios/costmeter-default": ["./packages/costmeter-default/src/index.ts"],
       "@helios/toolcache-mem": ["./packages/toolcache-mem/src/index.ts"],
+      "@helios/observability-langsmith": ["./packages/observability-langsmith/src/index.ts"],
       "@helios/workspace": ["./packages/workspace/src/index.ts"],
       "@helios/workspace/types": ["./packages/workspace/src/types.ts"]
     },

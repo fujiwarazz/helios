@@ -23,6 +23,34 @@ const silentLogger: Logger = {
 
 const noAsk = async (_r: AskQuestionRequest): Promise<AskQuestionResponse> => ({ answers: ["允许"] });
 
+interface RecordedRun {
+  id: string;
+  name: string;
+  runType: string;
+  parentId?: string;
+  input?: unknown;
+  result?: { status: string; output?: unknown };
+}
+
+class RecordingTracer {
+  readonly runs: RecordedRun[] = [];
+
+  startRun(input: { name: string; runType: string; input?: unknown }) {
+    return this.createRun(input, undefined);
+  }
+
+  private createRun(input: { name: string; runType: string; input?: unknown }, parentId: string | undefined) {
+    const run: RecordedRun = { id: String(this.runs.length), name: input.name, runType: input.runType, parentId, input: input.input };
+    this.runs.push(run);
+    return {
+      startChild: (child: { name: string; runType: string; input?: unknown }) => this.createRun(child, run.id),
+      end: async (result: { status: string; output?: unknown }) => {
+        run.result = result;
+      },
+    };
+  }
+}
+
 let workDir: string;
 beforeEach(async () => {
   workDir = await mkdtemp(join(tmpdir(), "helios-loopfix-"));
@@ -41,6 +69,7 @@ async function bootSession(
     askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
     logger?: Logger;
     contextBudgetWarnTokens?: number;
+    tracer?: RecordingTracer;
   } = {},
 ) {
   const manifest: Manifest = {
@@ -51,13 +80,78 @@ async function bootSession(
     ],
   };
   const { askQuestion, logger, ...rest } = sessionOpts;
-  const kernel = new Kernel({ workDir, manifest, logger: logger ?? silentLogger });
+  const kernel = new Kernel({ workDir, manifest, logger: logger ?? silentLogger, tracer: sessionOpts.tracer } as never);
   await kernel.start();
   const events: AgentEvent[] = [];
   const session = kernel.createSession({ askQuestion: askQuestion ?? noAsk, maxTurns, ...rest });
   session.on((e) => events.push(e));
   return { session, events };
 }
+
+describe("LangSmith trace hierarchy", () => {
+  it("records an agent root and LLM child for a normal turn", async () => {
+    const tracer = new RecordingTracer();
+    const { session } = await bootSession("mockLlmEmpty.ts", [], undefined, { tracer });
+
+    await session.sendMessage("hi");
+
+    expect(tracer.runs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "helios.agent_turn",
+          runType: "chain",
+          result: expect.objectContaining({ status: "success" }),
+        }),
+        expect.objectContaining({
+          name: "helios.llm.stream",
+          runType: "llm",
+          parentId: "0",
+          result: expect.objectContaining({ status: "success" }),
+        }),
+      ]),
+    );
+  });
+
+  it("records structured messages and the final assistant response", async () => {
+    const tracer = new RecordingTracer();
+    const { session } = await bootSession("mockLlmTextOnly.ts", [], undefined, { tracer });
+
+    await session.sendMessage("show me the response");
+
+    const root = tracer.runs.find((run) => run.name === "helios.agent_turn");
+    const llm = tracer.runs.find((run) => run.name === "helios.llm.stream");
+    expect(root?.input).toMatchObject({ messages: [expect.objectContaining({ content: "show me the response" })] });
+    expect(root?.result?.output).toMatchObject({ messages: expect.arrayContaining([expect.objectContaining({ role: "assistant" })]) });
+    expect(llm?.result?.output).toMatchObject({ assistant: expect.objectContaining({ role: "assistant" }) });
+  });
+
+  it("records every tool invocation beneath the agent turn", async () => {
+    const tracer = new RecordingTracer();
+    const { session } = await bootSession(
+      "mockLlmParallel.ts",
+      [{ port: "CapabilityProvider", package: fixture("mockCapabilityParallel.ts") }],
+      undefined,
+      { tracer },
+    );
+
+    await session.sendMessage("go");
+
+    expect(tracer.runs.filter((run) => run.runType === "tool")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "helios.tool.par__toolA",
+          parentId: "0",
+          result: expect.objectContaining({ status: "success" }),
+        }),
+        expect.objectContaining({
+          name: "helios.tool.par__toolB",
+          parentId: "0",
+          result: expect.objectContaining({ status: "success" }),
+        }),
+      ]),
+    );
+  });
+});
 
 describe("Bug 3 —— LLM 流错误优雅收尾（不 throw 穿透）", () => {
   it("流中途报错：sendMessage 不 reject，agent_end 一定 emit 且带 error", async () => {

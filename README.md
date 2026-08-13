@@ -19,6 +19,17 @@ Helios 是一个可插拔的代码 Agent，提供 Electron、Web 和 CLI 三种�
 pnpm install
 ```
 
+## LangSmith 可观测性
+
+Helios 会在 `LANGSMITH_TRACING=true` 且配置了 `LANGSMITH_API_KEY` 时自动发送追踪数据；未配置、关闭或 LangSmith 不可用时，Agent 正常继续执行。
+
+```bash
+cp .env.example .env
+# 在 .env 中填写 LANGSMITH_API_KEY
+```
+
+将这些变量提供给运行 CLI、Electron 主进程或 Web Host 的进程。每次 Agent run 会生成一个根 trace，模型流式调用和工具调用则显示为它的 `llm` 与 `tool` 子 run。追踪输入会自动裁剪，并脱敏 `Authorization`、Cookie、token、密码和 API key 等字段；不要把真实密钥写入仓库、日志或聊天记录。若密钥曾在聊天或日志中出现，请在 LangSmith 控制台轮换它。
+
 Electron（本地目录使用原生目录选择器）：
 
 ```bash

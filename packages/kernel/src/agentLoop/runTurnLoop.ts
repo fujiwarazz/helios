@@ -17,6 +17,7 @@ import { computeRetryDelayMs, realSleep, DEFAULT_LLM_RETRY } from "./retryBackof
 import { normalizeLlmError } from "../errors";
 import { warnIfMessagePathExceeds } from "./contextBudget";
 import { dispatchRunStart, dispatchTurnStart, dispatchLLMResponse, dispatchRunEnd } from "./runtimeDispatch";
+import type { TraceRun, TraceStatus } from "@helios/observability-langsmith";
 
 export interface RunTurnLoopParams {
   /** run 期间不变的基础设施依赖（LLM/工具/hook/ports/日志/askQuestion/中断信号/事件出口）。 */
@@ -56,6 +57,47 @@ export interface RunTurnLoopResult {
  * 只通过 `tree` 回调驱动 —— 调用方（Session）继续独占树状态。
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
+  const { deps, runId, llmOptions } = params;
+  const existingMessageIds = new Set(params.tree.pathToHead().map((message) => message.id));
+  const trace = deps.tracer.startRun({
+    name: "helios.agent_turn",
+    runType: "chain",
+    input: { messages: params.pendingLeadMessages },
+    metadata: {
+      sessionId: deps.sessionId,
+      runId,
+      provider: deps.provider.id,
+      model: llmOptions.model ?? "",
+    },
+  });
+  let status: TraceStatus = "success";
+  let thrown: unknown;
+  let result: RunTurnLoopResult | undefined;
+
+  try {
+    result = await runTurnLoopInternal(params, trace);
+    if (result.runError) status = "error";
+    return result;
+  } catch (error) {
+    status = deps.signal.aborted ? "cancelled" : "error";
+    thrown = error;
+    throw error;
+  } finally {
+    if (deps.signal.aborted) status = "cancelled";
+    await trace.end({
+      status,
+      output:
+        result && {
+          turnIds: result.turnIds,
+          reachedMaxTurns: result.reachedMaxTurns,
+          messages: params.tree.pathToHead().filter((message) => !existingMessageIds.has(message.id)),
+        },
+      error: thrown ?? result?.runError,
+    });
+  }
+}
+
+async function runTurnLoopInternal(params: RunTurnLoopParams, trace: TraceRun): Promise<RunTurnLoopResult> {
   const { deps, tree, turnIdPrefix, runId, runIndex, maxTurns, system, llmOptions, getSteeringMessages } = params;
   const { provider, toolRegistry, hooks, sessionId, workDir, logger, askQuestion, signal, events } = deps;
   const { runtimes, llmRegistry } = deps;
@@ -128,6 +170,13 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     let streamed: Awaited<ReturnType<typeof streamAssistant>> | undefined;
     let retryCount = 0;
     while (true) {
+      const llmTrace = trace.startChild({
+        name: "helios.llm.stream",
+        runType: "llm",
+        input: { messages: path, tools: traceableTools(toolRegistry.list()), options: effective },
+        metadata: { provider: usedProvider.id, turnId, retryCount },
+      });
+      let streamThrown: unknown;
       try {
         streamed = await streamAssistant({
           provider: usedProvider,
@@ -141,10 +190,22 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
           events,
         });
       } catch (err) {
+        streamThrown = err;
         // 中断导致的流异常（AbortError）视为正常停止，不向上抛，直接结束整个 run（与改造前一致）。
         if (signal.aborted) break turnLoop;
         // 非预期错误（非 SDK APIError）：归一化成单一类型再穿透，不裸抛底层 SDK/内部异常。
         throw normalizeLlmError(err);
+      } finally {
+        await llmTrace.end({
+          status: signal.aborted ? "cancelled" : streamThrown || streamed?.streamError ? "error" : "success",
+          output:
+            streamed && {
+              assistant: streamed.assistantMsg,
+              stopReason: streamed.stopReason,
+              usage: streamed.usage,
+            },
+          error: streamThrown ?? streamed?.streamError,
+        });
       }
       if (!streamed.streamError) break; // 成功，跳出重试循环
       if (signal.aborted) break turnLoop; // 中断视为正常停止，不重试、不计错误、不落 runError（保留现状语义）
@@ -210,6 +271,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         fileSystem: deps.fileSystem,
         recordEdit: deps.recordEdit,
         markAuditGap: deps.markAuditGap,
+        trace,
       });
       tree.appendNode(toolResultMsg);
       turnMessages.push(toolResultMsg);
@@ -243,6 +305,10 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
   const outcomeStatus: TaskOutcome["status"] = signal.aborted ? "cancelled" : runError ? "failure" : "success";
   const costReport = await dispatchRunEnd(runtimes, runId, { status: outcomeStatus });
   return { turnIds, runError, reachedMaxTurns: turnIndex >= maxTurns, costReport };
+}
+
+function traceableTools(tools: import("@helios/ports").Tool[]): Array<Pick<import("@helios/ports").Tool, "name" | "description" | "inputSchema">> {
+  return tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 }
 
 interface RouteSignalState {
