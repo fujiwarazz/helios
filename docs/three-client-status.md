@@ -1,4 +1,4 @@
-# 三端整合状态（protocol + ui-chat + host + web）
+# 三端整合状态（Workspace Platform + protocol + ui-chat + host）
 
 目标：把内核（kernel/Session）从"只能同进程被 CLI 调用"推进到"可被跨进程/跨机器前端消费"，并跑通一条浏览器端到端链路。
 
@@ -9,8 +9,20 @@
 | `@helios/protocol` | 领域无关的极简 JSON-RPC（envelope 编解码 + 请求-响应配对 + 事件多路复用 + 断线重连）+ 可替换 Transport 抽象 + WebSocket 传输 | ✅ 完成 |
 | `@helios/ui-chat` | 极简 React 对话渲染库（消息流 + 工具卡片 + 输入框 + 连接状态条）+ `IChatClient` 契约 + `RpcChatClient` | ✅ 完成 |
 | `@helios/host` | Kernel Session ↔ protocol RpcServer 的领域适配层（`bindSession` + `serveKernelOverWs` + `serveKernelOverElectronIpc`），对应 valos Electron 的 RemoteControlServer | ✅ 完成 |
+| `@helios/workspace` | 三端共用的 Workspace Catalog、本地导入/Git Clone、direct/worktree 物化、Session binding、Memory、EditRecord 和 Runtime Registry | ✅ 首期单仓完成 |
 | `apps/web` | 浏览器客户端（Vite+React）+ Node WS 宿主 runner（`server/host.ts`），对应 valos-web | ✅ 完成 |
 | `apps/electron` | Electron 桌面客户端：主进程内直连起 Kernel + `serveKernelOverElectronIpc`，渲染进程走 `@helios/protocol` 的 `ElectronIpcBridge`，对应 valos-view（Electron 渲染层） | ✅ 完成（简化版：单窗口，不含打包/自动更新） |
+| `apps/cli` | Workspace flags、旧会话迁移、恢复 binding 和同进程 Runtime | ✅ 完成 |
+
+## Chat/Code 产品状态
+
+- Electron/Web 默认 Chat；`HELIOS_CODE_MODE=1` 后可在主页面切换 Code，Sidebar 保持一致。
+- Electron 通过原生目录选择器授权本地目录，Renderer 只得到 `WorkspaceSummary`，不获得或提交真实路径。
+- Web 本地目录受 `HELIOS_WORKSPACE_ROOTS` allowlist 限制，Host 强制 loopback；Git Clone 始终在 Host 执行。
+- CLI 支持 `--code`、`--clone`、`--workspace`、`--worktree`、`--resume` 和 `--legacy-workdir`。
+- `direct` 是默认行为且会真实修改原仓库；Git `worktree` 使用独立 `helios/<materializationId>` 分支。
+- 首发后 binding 锁定；Workspace Platform 的 rollback 固定为 conversation-only。
+- Write/Edit 有逐文件 EditRecord；Bash/外部进程的完整编辑归因仍是已知限制。
 
 ### 浏览器安全入口（node/browser 传输隔离）
 
@@ -65,19 +77,17 @@ transport.onClose(() => unbind());  // 断开必须解绑,否则重连累积监�
 的 `useChat`）优先用事件自带的 `descriptor`，未命中才落回本地通用兜底——新增一个工具的专属渲染
 样式，只需在其 `CapabilityProvider.getRenderers()` 里注册，`apps/web`/`apps/electron` 零改动同步生效。
 
-## 端到端跑法（apps/web，需真实本地模型网关）
+## 端到端跑法（apps/web，需真实模型配置）
 
 1. 起本地模型网关（`127.0.0.1:8788`，见根 `helios.config.json` 的 `llm-anthropic`）。
-2. `pnpm -C <helios> --filter @helios/web host`（Node WS 宿主，默认 8787；可 `HELIOS_WEB_PORT` 覆盖）。
-3. `pnpm -C <helios> --filter @helios/web dev`（Vite，:5173）。
-4. 浏览器开 `http://localhost:5173/?ws=ws://localhost:8787` → 对话；断开宿主 → 顶部状态条"已断开"，恢复自动重连。
+2. `HELIOS_CODE_MODE=1 HELIOS_WORKSPACE_ROOTS=<allowed-root> pnpm -C <helios> --filter @helios/web dev`。
+3. 浏览器打开 Vite 输出的地址；页面默认 Chat，切换 Code 后可选择 Host allowlist 内目录或 Git Clone。
 
-## 端到端跑法（apps/electron，需真实本地模型网关）
+## 端到端跑法（apps/electron，需真实模型配置）
 
 1. 起本地模型网关（同上，见根 `helios.config.json`）。
-2. `pnpm -C <helios> --filter @helios/electron dev`（先 esbuild 出 `dist-electron/main.js`+`preload.cjs`，
-   再并行起 Vite（:5174）+ `electron .`；主进程内直连起 Kernel，不监听端口，不经 WebSocket）。
-3. 窗口内直接对话；侧边栏/工具卡片/流式渲染与 web 端行为一致（共用同一份 `@helios/ui-chat`）。
+2. `HELIOS_CODE_MODE=1 pnpm -C <helios> --filter @helios/electron dev`（先构建受限 preload，再并行启动 Vite 与 Electron；主进程内运行 Workspace Host，不监听端口）。
+3. 窗口默认 Chat；切换 Code 后通过原生目录选择器或 Git Clone 选择仓库。
 
 ## ui-chat 待补清单（本期极简，不追求样式打磨）
 

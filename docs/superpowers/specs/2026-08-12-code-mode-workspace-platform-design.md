@@ -207,7 +207,9 @@ interface EditRecord {
   repositories/
     <repositoryId>/source/           # 受管 git clone
   worktrees/
-    <workspaceId>/<materializationId>/<rootId>/ # Session 隔离 worktree
+    <workspaceId>/<materializationId>/
+      materialization.json                    # 来源 reference 与隔离分支元数据
+      <rootId>/                               # Session 隔离 worktree
   workspace-memory/
     <workspaceId>/MEMORY.md
     <workspaceId>/<topic>.md
@@ -224,6 +226,8 @@ interface EditRecord {
 ```
 
 本地目录的 `direct` 模式不会复制源代码；Workspace Catalog 只记录来源，文件仍在原目录。Git Clone 由平台放到受管目录。Session 数据不再写到 `<workDir>/.helios/sessions`，避免历史列表被当前仓库切碎，也避免 Chat 文件、会话元数据和代码仓库生命周期互相绑死。
+
+`worktree` 不直接再次检出用户已占用的 `main`/feature 分支，而是从所选 reference 创建 `helios/<materializationId>` 独立分支。物化目录外的 `materialization.json` 保存 reference、revision 和实际工作分支，恢复时同时校验 Git common dir、注册路径、元数据和 HEAD，避免误复用其他仓库或来源分支。
 
 所有持久化 JSON/JSONL 记录首期即带 `schemaVersion`，读取时做运行时校验；未知大版本拒绝读取，已知旧版本通过显式 migrator 转换，不做无提示猜测。
 
