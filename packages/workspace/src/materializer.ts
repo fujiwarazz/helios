@@ -1,5 +1,5 @@
-import { access, mkdir, realpath, rm } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { WorkspacePaths } from "./paths";
 import { ExecaGitRunner, type GitRunner } from "./repositoryService";
 import type {
@@ -22,6 +22,14 @@ export interface LocalWorkspaceMaterializerOptions {
 }
 
 const worktreeLocks = new Map<string, Promise<void>>();
+
+interface WorktreeMetadata {
+  schemaVersion: 1;
+  materializationId: string;
+  reference: string;
+  revision?: string;
+  workingBranch: string;
+}
 
 export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
   private readonly paths: WorkspacePaths;
@@ -84,19 +92,53 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     return withWorktreeLock(lockKey, async () => {
       const requestedBranch = rootBinding.branch ?? root.git?.defaultBranch;
       const reference = requestedBranch ?? "HEAD";
+      const workingBranch = `helios/${rootBinding.materializationId}`;
+      const metadataFile = join(dirname(target), "materialization.json");
       if (await pathExists(target)) {
         await this.validateExistingWorktree({
           source,
           target,
-          requestedBranch,
+          metadataFile,
+          materializationId: rootBinding.materializationId,
+          reference,
+          workingBranch,
           revision: rootBinding.revision,
         });
       } else {
         await mkdir(dirname(target), { recursive: true });
+        let created = false;
         try {
-          await this.git.run(["worktree", "add", target, reference], { cwd: source });
+          await this.git.run(
+            [
+              "worktree",
+              "add",
+              "-b",
+              workingBranch,
+              target,
+              rootBinding.revision ?? reference,
+            ],
+            { cwd: source },
+          );
+          created = true;
+          const metadata: WorktreeMetadata = {
+            schemaVersion: 1,
+            materializationId: rootBinding.materializationId,
+            reference,
+            revision: rootBinding.revision,
+            workingBranch,
+          };
+          await writeFile(metadataFile, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
         } catch (error) {
+          if (created) {
+            await this.git
+              .run(["worktree", "remove", "--force", target], { cwd: source })
+              .catch(() => undefined);
+            await this.git
+              .run(["branch", "-D", workingBranch], { cwd: source })
+              .catch(() => undefined);
+          }
           await rm(target, { recursive: true, force: true });
+          await rm(metadataFile, { force: true });
           throw error;
         }
       }
@@ -107,7 +149,10 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
   private async validateExistingWorktree(options: {
     source: string;
     target: string;
-    requestedBranch?: string;
+    metadataFile: string;
+    materializationId: string;
+    reference: string;
+    workingBranch: string;
     revision?: string;
   }): Promise<void> {
     const listing = await this.git.run(["worktree", "list", "--porcelain"], {
@@ -134,22 +179,30 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
       throw new Error("existing worktree belongs to a different repository");
     }
 
-    if (options.requestedBranch) {
-      let branch: string;
-      try {
-        branch = (
-          await this.git.run(["symbolic-ref", "--quiet", "--short", "HEAD"], {
-            cwd: options.target,
-          })
-        ).stdout.trim();
-      } catch {
-        throw new Error("existing worktree does not match requested branch");
-      }
-      if (branch !== options.requestedBranch) {
-        throw new Error(
-          `existing worktree branch ${JSON.stringify(branch)} does not match ${JSON.stringify(options.requestedBranch)}`,
-        );
-      }
+    const metadata = await readWorktreeMetadata(options.metadataFile);
+    if (
+      metadata.materializationId !== options.materializationId ||
+      metadata.reference !== options.reference ||
+      metadata.revision !== options.revision ||
+      metadata.workingBranch !== options.workingBranch
+    ) {
+      throw new Error("existing worktree does not match requested branch or materialization");
+    }
+
+    let branch: string;
+    try {
+      branch = (
+        await this.git.run(["symbolic-ref", "--quiet", "--short", "HEAD"], {
+          cwd: options.target,
+        })
+      ).stdout.trim();
+    } catch {
+      throw new Error("existing worktree does not match requested branch");
+    }
+    if (branch !== options.workingBranch) {
+      throw new Error(
+        `existing worktree branch ${JSON.stringify(branch)} does not match ${JSON.stringify(options.workingBranch)}`,
+      );
     }
 
     if (options.revision) {
@@ -166,6 +219,28 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     const output = (await this.git.run(["rev-parse", "--git-common-dir"], { cwd })).stdout.trim();
     return await realpath(isAbsolute(output) ? output : resolve(cwd, output));
   }
+}
+
+async function readWorktreeMetadata(path: string): Promise<WorktreeMetadata> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("existing worktree is missing valid materialization metadata");
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    (value as Partial<WorktreeMetadata>).schemaVersion !== 1 ||
+    typeof (value as Partial<WorktreeMetadata>).materializationId !== "string" ||
+    typeof (value as Partial<WorktreeMetadata>).reference !== "string" ||
+    typeof (value as Partial<WorktreeMetadata>).workingBranch !== "string" ||
+    ((value as Partial<WorktreeMetadata>).revision !== undefined &&
+      typeof (value as Partial<WorktreeMetadata>).revision !== "string")
+  ) {
+    throw new Error("existing worktree is missing valid materialization metadata");
+  }
+  return value as WorktreeMetadata;
 }
 
 async function pathExists(path: string): Promise<boolean> {

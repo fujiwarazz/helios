@@ -77,6 +77,22 @@ describe("LocalWorkspaceMaterializer", () => {
     );
   });
 
+  it("creates an isolated branch when the source branch is already checked out", async () => {
+    const source = await createRepository(join(dataRoot, "source"));
+    await runGit(["checkout", "main"], source);
+    const target = gitWorkspace(source);
+    const materializer = new LocalWorkspaceMaterializer({ paths });
+
+    const result = await materializer.materialize(
+      target,
+      binding(target, "worktree", { materializationId: "mat_checked_out" }),
+    );
+
+    expect((await runGit(["branch", "--show-current"], result.primaryDir)).stdout).toBe(
+      "helios/mat_checked_out",
+    );
+  });
+
   it("serializes concurrent creation for the same physical worktree", async () => {
     const source = await createRepository(join(dataRoot, "source"));
     const target = gitWorkspace(source);
@@ -110,10 +126,10 @@ describe("LocalWorkspaceMaterializer", () => {
 
     expect(main.primaryDir).not.toBe(feature.primaryDir);
     expect((await runGit(["rev-parse", "--abbrev-ref", "HEAD"], main.primaryDir)).stdout).toBe(
-      "main",
+      "helios/mat_main",
     );
     expect((await runGit(["rev-parse", "--abbrev-ref", "HEAD"], feature.primaryDir)).stdout).toBe(
-      "feature",
+      "helios/mat_feature",
     );
   });
 
