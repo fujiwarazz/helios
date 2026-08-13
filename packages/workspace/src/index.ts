@@ -14,6 +14,11 @@ export {
   type LocalRepositoryServiceOptions,
   type RepositoryService,
 } from "./repositoryService";
+export {
+  LocalWorkspaceMaterializer,
+  type LocalWorkspaceMaterializerOptions,
+  type WorkspaceMaterializer,
+} from "./materializer";
 export type {
   CloneWorkspaceRequest,
   EditRecord,
