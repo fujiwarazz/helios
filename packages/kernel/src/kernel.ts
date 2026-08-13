@@ -32,6 +32,8 @@ const DEFAULT_SYSTEM =
 
 export interface KernelOptions {
   workDir: string;
+  /** Session 持久化目录；缺省保持 `<workDir>/.helios/sessions` 兼容行为。 */
+  sessionDataRoot?: string;
   manifest: Manifest;
   logger?: Logger;
   system?: string;
@@ -55,6 +57,10 @@ export interface CreateSessionOptions {
    * `agentLoop/contextBudget.ts`。
    */
   contextBudgetWarnTokens?: number;
+  /** 首次 run 在写入用户消息和执行工具前调用；用于原子提交平台 SessionRecord。 */
+  beforeFirstRun?: (text: string) => Promise<void>;
+  /** 平台持久化 run 生命周期；一次多-turn run 只产生一对 running/终态。 */
+  onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
 }
 
 export class Kernel {
@@ -154,6 +160,10 @@ export class Kernel {
     return new Session({
       id,
       workDir: this.opts.workDir,
+      sessionDir: join(
+        this.opts.sessionDataRoot ?? join(this.opts.workDir, ".helios", "sessions"),
+        id,
+      ),
       ports: this.ports,
       tools: this.tools,
       hooks: this.hooks,
@@ -165,6 +175,8 @@ export class Kernel {
       llmRetry: opts.llmRetry,
       sleep: opts.sleep,
       contextBudgetWarnTokens: opts.contextBudgetWarnTokens,
+      beforeFirstRun: opts.beforeFirstRun,
+      onRunStateChange: opts.onRunStateChange,
     });
   }
 
@@ -181,7 +193,7 @@ export class Kernel {
    * 按 updatedAt 倒序；目录缺失或单条损坏时安全跳过。只读，不 resume。
    */
   async listSessions(): Promise<SessionMeta[]> {
-    const dir = join(this.opts.workDir, ".helios", "sessions");
+    const dir = this.opts.sessionDataRoot ?? join(this.opts.workDir, ".helios", "sessions");
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -191,7 +203,7 @@ export class Kernel {
     const metas: SessionMeta[] = [];
     for (const id of entries) {
       try {
-        const raw = await readFile(join(dir, id, "meta.json"), "utf8");
+        const raw = await readKernelMeta(dir, id);
         const meta = JSON.parse(raw) as SessionMeta;
         if (meta && typeof meta.id === "string") metas.push(meta);
       } catch {
@@ -220,6 +232,15 @@ export class Kernel {
       tools,
       enabled: true,
     }));
+  }
+}
+
+async function readKernelMeta(root: string, id: string): Promise<string> {
+  try {
+    return await readFile(join(root, id, "kernel-meta.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return await readFile(join(root, id, "meta.json"), "utf8");
   }
 }
 

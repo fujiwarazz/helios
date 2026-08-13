@@ -22,6 +22,7 @@ import { CostAwareRuntime } from "./agentLoop/costAwareRuntime";
 
 /** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
 interface PersistedCompaction {
+  schemaVersion: 1;
   firstPostId: string | null;
   summaryId: string;
   firstKeptId: string | null;
@@ -29,9 +30,12 @@ interface PersistedCompaction {
   summaryParentId: string | null;
 }
 
+class UnsupportedPersistedSchemaError extends Error {}
+
 export interface SessionOptions {
   id: string;
   workDir: string;
+  sessionDir: string;
   ports: PortRegistry;
   tools: ToolRegistry;
   hooks: HookRunner;
@@ -47,10 +51,13 @@ export interface SessionOptions {
   sleep?: (ms: number) => Promise<void>;
   /** 上下文预算可观测性阈值；不传则不检查。见 `agentLoop/contextBudget.ts`。 */
   contextBudgetWarnTokens?: number;
+  beforeFirstRun?: (text: string) => Promise<void>;
+  onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
 }
 
-/** 会话元数据，落 `<workDir>/.helios/sessions/<id>/meta.json`，供列表展示与 resume。 */
-export interface SessionMeta {
+/** 会话元数据，落 `<sessionDir>/kernel-meta.json`，供兼容列表与 resume。 */
+export interface KernelSessionMeta {
+  schemaVersion: 1;
   id: string;
   title: string;
   createdAt: number;
@@ -58,6 +65,9 @@ export interface SessionMeta {
   lastRunIndex: number;
   lastTurnIndex: number;
 }
+
+/** @deprecated 使用 KernelSessionMeta；保留别名兼容既有消费方。 */
+export type SessionMeta = KernelSessionMeta;
 
 /** 分支信息：叶子节点 id + 从根到该叶子的深度。 */
 export interface BranchInfo {
@@ -108,6 +118,8 @@ export class Session {
    * 的固定分发点，Session 只负责"组装出这个数组"。
    */
   private readonly runtimes: Runtime[];
+  private firstRunPrepared = false;
+  private runState: "running" | "idle" | "interrupted" | undefined;
 
   constructor(private readonly opts: SessionOptions) {
     this.id = opts.id;
@@ -134,6 +146,10 @@ export class Session {
    * 会话数据仍留在磁盘可 resume，本方法不删除/清理任何状态，纯粹是生命周期通知点。
    */
   async dispose(): Promise<void> {
+    if (this.currentAbort) {
+      this.currentAbort.abort();
+      await this.setRunState("interrupted");
+    }
     await this.opts.hooks.runSessionEnd({ sessionId: this.id, workDir: this.opts.workDir });
   }
 
@@ -236,6 +252,14 @@ export class Session {
     }
     text = submitDecision.text ?? text;
 
+    if (!this.firstRunPrepared) {
+      await this.opts.beforeFirstRun?.(text);
+      this.firstRunPrepared = true;
+    }
+    await this.setRunState("running");
+    let runCompleted = false;
+    try {
+
     // SessionStart：懒触发，仅首次 sendMessage() 调用一次（对齐 valos session.start() 内触发时机）。
     if (!this.sessionStarted) {
       this.sessionStarted = true;
@@ -334,7 +358,6 @@ export class Session {
 
     const newMessages = this.pathToHead().slice(before);
     // costReport 已由 runTurnLoop 内部对 runtimes 分发 onRunEnd 产出；Session 不再直接调用任何 Port。
-    if (this.currentAbort === abort) this.currentAbort = null; // 清理本 run 的中断控制器
     this.emit({
       type: "agent_end",
       runId,
@@ -345,7 +368,12 @@ export class Session {
       costReport,
     });
     logger.debug(`run ${runId} 完成，共 ${turnIds.length} 个 turn`);
+    runCompleted = true;
     return newMessages;
+    } finally {
+      this.currentAbort = null;
+      await this.setRunState(runCompleted ? "idle" : "interrupted");
+    }
   }
 
   /**
@@ -412,7 +440,7 @@ export class Session {
   }
 
   private turnsDir(): string {
-    return join(this.opts.workDir, ".helios", "sessions", this.id);
+    return this.opts.sessionDir;
   }
 
   private async writeTurnLog(): Promise<void> {
@@ -426,7 +454,8 @@ export class Session {
     const dir = this.turnsDir();
     await mkdir(dir, { recursive: true });
     const last = this.turnLog[this.turnLog.length - 1];
-    const meta: SessionMeta = {
+    const meta: KernelSessionMeta = {
+      schemaVersion: 1,
       id: this.id,
       title: this.title,
       createdAt: this.createdAt,
@@ -434,7 +463,7 @@ export class Session {
       lastRunIndex: last?.runIndex ?? -1,
       lastTurnIndex: last?.turnIndex ?? -1,
     };
-    await writeFile(join(dir, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
+    await writeFile(join(dir, "kernel-meta.json"), JSON.stringify(meta, null, 2), "utf8");
   }
 
   /** 全量重写压缩记录（含 summary 节点内容），供跨 resume 恢复压缩视图。 */
@@ -445,6 +474,7 @@ export class Session {
       .map((c) => {
         const node = this.nodes.get(c.summaryId);
         const rec: PersistedCompaction = {
+          schemaVersion: 1,
           firstPostId: c.firstPostId,
           summaryId: c.summaryId,
           firstKeptId: c.firstKeptId,
@@ -469,10 +499,11 @@ export class Session {
     const dir = this.turnsDir();
     // meta（可选）
     try {
-      const meta = JSON.parse(await readFile(join(dir, "meta.json"), "utf8")) as SessionMeta;
+      const meta = await this.readMeta(dir);
       if (typeof meta.createdAt === "number") this.createdAt = meta.createdAt;
       if (typeof meta.title === "string") this.title = meta.title;
-    } catch {
+    } catch (error) {
+      if (error instanceof UnsupportedPersistedSchemaError) throw error;
       // 无 meta 或损坏：忽略，用默认值
     }
     // turns.jsonl（权威）
@@ -494,8 +525,9 @@ export class Session {
     for (const line of lines) {
       let rec: TurnRecord;
       try {
-        rec = JSON.parse(line) as TurnRecord;
-      } catch {
+        rec = parseTurnRecord(line);
+      } catch (error) {
+        if (error instanceof UnsupportedPersistedSchemaError) throw error;
         this.opts.logger.warn(`跳过损坏的 turn 记录：${line.slice(0, 80)}`);
         continue;
       }
@@ -515,8 +547,9 @@ export class Session {
       for (const line of rawC.split("\n").filter((l) => l.trim())) {
         let pc: PersistedCompaction;
         try {
-          pc = JSON.parse(line) as PersistedCompaction;
-        } catch {
+          pc = parseCompaction(line);
+        } catch (error) {
+          if (error instanceof UnsupportedPersistedSchemaError) throw error;
           this.opts.logger.warn(`跳过损坏的压缩记录：${line.slice(0, 80)}`);
           continue;
         }
@@ -534,7 +567,8 @@ export class Session {
         });
         this.summaryIds.add(pc.summaryId);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof UnsupportedPersistedSchemaError) throw error;
       // 无压缩记录文件：跳过
     }
 
@@ -543,6 +577,29 @@ export class Session {
     );
     this.wasResumed = this.turnLog.length > 0;
     return this.wasResumed;
+  }
+
+  private async readMeta(dir: string): Promise<KernelSessionMeta> {
+    let value: unknown;
+    try {
+      value = JSON.parse(await readFile(join(dir, "kernel-meta.json"), "utf8")) as unknown;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      value = JSON.parse(await readFile(join(dir, "meta.json"), "utf8")) as unknown;
+    }
+    if (!isObject(value)) throw new Error("invalid kernel session metadata");
+    if ("schemaVersion" in value && value.schemaVersion !== 1) {
+      throw new UnsupportedPersistedSchemaError(
+        `unsupported kernel session schema version ${String(value.schemaVersion)}`,
+      );
+    }
+    return { ...value, schemaVersion: 1 } as unknown as KernelSessionMeta;
+  }
+
+  private async setRunState(state: "running" | "idle" | "interrupted"): Promise<void> {
+    if (this.runState === state) return;
+    await this.opts.onRunStateChange?.(state);
+    this.runState = state;
   }
 
   /**
@@ -583,6 +640,32 @@ export class Session {
     this.emit({ type: "rollback", turnId, historyLength });
     this.opts.logger.debug(`已回溯到 turn ${turnId} 之前，历史长度 ${historyLength}`);
   }
+}
+
+function parseTurnRecord(line: string): TurnRecord {
+  const value = JSON.parse(line) as unknown;
+  if (!isObject(value)) throw new Error("turn record must be an object");
+  if ("schemaVersion" in value && value.schemaVersion !== 1) {
+    throw new UnsupportedPersistedSchemaError(
+      `unsupported turn schema version ${String(value.schemaVersion)}`,
+    );
+  }
+  return { ...value, schemaVersion: 1 } as unknown as TurnRecord;
+}
+
+function parseCompaction(line: string): PersistedCompaction {
+  const value = JSON.parse(line) as unknown;
+  if (!isObject(value)) throw new Error("compaction record must be an object");
+  if ("schemaVersion" in value && value.schemaVersion !== 1) {
+    throw new UnsupportedPersistedSchemaError(
+      `unsupported compaction schema version ${String(value.schemaVersion)}`,
+    );
+  }
+  return { ...value, schemaVersion: 1 } as unknown as PersistedCompaction;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** 近似 token 估算：内容字符数 / 4（供 CompactStrategyPort.shouldCompact 判断）。 */

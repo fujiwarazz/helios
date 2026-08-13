@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,6 +48,28 @@ describe("kernel listSessions / listPorts", () => {
     expect(list[0].updatedAt).toBeGreaterThanOrEqual(list[1].updatedAt);
     expect(list.map((m) => m.id)).toContain(s1.id);
     expect(list.map((m) => m.id)).toContain(s2.id);
+  });
+
+  it("从独立 sessionDataRoot 列出会话", async () => {
+    const sessionDataRoot = await mkdtemp(join(tmpdir(), "helios-list-state-"));
+    try {
+      const kernel = new Kernel({
+        workDir,
+        sessionDataRoot,
+        manifest: manifest(),
+        logger: silent,
+      });
+      await kernel.start();
+      const session = kernel.createSession({ askQuestion: noAsk });
+      await session.sendMessage("global state");
+
+      expect((await kernel.listSessions()).map((meta) => meta.id)).toEqual([session.id]);
+      await expect(
+        access(join(workDir, ".helios", "sessions", session.id)),
+      ).rejects.toBeDefined();
+    } finally {
+      await rm(sessionDataRoot, { recursive: true, force: true });
+    }
   });
 
   it("listPorts 按 provider 聚合工具,含 builtin", async () => {

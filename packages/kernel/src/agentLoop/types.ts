@@ -19,6 +19,7 @@ export type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
 
 /** 单个 turn 的持久化记录，Session（turns.jsonl）与 runTurnLoop 共用同一形状。 */
 export interface TurnRecord {
+  schemaVersion: 1;
   turnId: string;
   runIndex: number;
   turnIndex: number;

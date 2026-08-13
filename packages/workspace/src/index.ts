@@ -19,6 +19,18 @@ export {
   type LocalWorkspaceMaterializerOptions,
   type WorkspaceMaterializer,
 } from "./materializer";
+export {
+  LocalSessionCatalog,
+  SessionBindingConflictError,
+  SessionCatalogError,
+  type LocalSessionCatalogOptions,
+  type SessionCatalog,
+} from "./sessionCatalog";
+export {
+  AmbiguousLegacySessionError,
+  LegacySessionMigrator,
+  type LegacySessionMigratorOptions,
+} from "./legacySessionMigrator";
 export type {
   CloneWorkspaceRequest,
   EditRecord,

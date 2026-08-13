@@ -2,7 +2,7 @@
 export { Kernel } from "./kernel";
 export type { KernelOptions, CreateSessionOptions, PortInfo } from "./kernel";
 export { Session } from "./session";
-export type { SessionOptions, SessionMeta } from "./session";
+export type { KernelSessionMeta, SessionOptions, SessionMeta } from "./session";
 export { ServiceCollection, createServiceToken } from "./serviceCollection";
 export type { ServiceToken } from "./serviceCollection";
 export {
