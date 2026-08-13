@@ -4,6 +4,7 @@
 
 import { electronRendererTransport } from "@helios/protocol/browser";
 import type { Transport } from "@helios/protocol/browser";
+import type { SessionLaunchRequest } from "@helios/workspace/types";
 
 function newConnectionId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -16,8 +17,17 @@ function newConnectionId(): string {
  * wsUrlFor 的 ?session= 参数)。每次调用生成一个新 connectionId,对应 web 端"每个
  * activeSessionId/nonce 组合建一条新连接"。
  */
-export async function connectElectronTransport(resumeSessionId?: string): Promise<Transport> {
+export async function connectElectronTransport(
+  resumeSessionId?: string,
+  launch?: SessionLaunchRequest,
+): Promise<Transport> {
   const connectionId = newConnectionId();
-  await window.helios.connect({ connectionId, resumeSessionId });
+  await window.helios.connect(
+    resumeSessionId
+      ? { connectionId, resumeSessionId }
+      : launch
+        ? { connectionId, launch }
+        : { connectionId },
+  );
   return electronRendererTransport(window.helios, connectionId);
 }

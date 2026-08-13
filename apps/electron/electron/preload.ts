@@ -6,10 +6,12 @@
 // ============================================================================
 
 import { contextBridge, ipcRenderer } from "electron";
+import type { SessionLaunchRequest } from "@helios/workspace/types";
 
 interface ConnectRequest {
   connectionId: string;
   resumeSessionId?: string;
+  launch?: SessionLaunchRequest;
 }
 
 contextBridge.exposeInMainWorld("helios", {
@@ -31,4 +33,9 @@ contextBridge.exposeInMainWorld("helios", {
   close: (connectionId: string): void => {
     ipcRenderer.send("helios:close", { connectionId });
   },
+});
+
+contextBridge.exposeInMainWorld("heliosDesktop", {
+  selectAndImportDirectory: () =>
+    ipcRenderer.invoke("helios:select-and-import-directory"),
 });

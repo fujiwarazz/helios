@@ -1,20 +1,58 @@
-// apps/electron/src/lib/rpc.ts —— 应用侧对宿主只读 RPC 的薄封装。
-// 与 apps/web 的版本区别:没有 wsUrlFor(electron 走 IPC 不走 WS URL),
-// 连接建立逻辑在 ../electronRpc.ts。
-
 import type { RpcClient } from "@helios/protocol/browser";
-import type { SessionMeta, PortInfo } from "@helios/kernel";
+import type { PortInfo, SessionMeta } from "@helios/kernel";
+import type {
+  SessionRecord,
+  SessionWorkspaceBinding,
+  WorkspaceSummary,
+} from "@helios/workspace/types";
 
-/** 会话列表视图(直接用后端 SessionMeta)。 */
 export type SessionMetaView = SessionMeta;
 export type PortInfoView = PortInfo;
 
+export interface HostCapabilities {
+  codeMode: boolean;
+  localImport: boolean;
+  rollbackMode: "conversation-only";
+}
+
 export async function listSessions(rpc: RpcClient): Promise<SessionMetaView[]> {
-  const r = await rpc.call("sessions.list");
-  return Array.isArray(r) ? (r as SessionMetaView[]) : [];
+  const result = await rpc.call("sessions.list");
+  if (!Array.isArray(result)) return [];
+  return result.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const record = entry as Partial<SessionRecord> & Partial<SessionMetaView>;
+    return record.meta
+      ? [{
+          schemaVersion: 1,
+          ...record.meta,
+          lastRunIndex: 0,
+          lastTurnIndex: 0,
+        }]
+      : [record as SessionMetaView];
+  });
 }
 
 export async function listPorts(rpc: RpcClient): Promise<PortInfoView[]> {
-  const r = await rpc.call("ports.list");
-  return Array.isArray(r) ? (r as PortInfoView[]) : [];
+  const result = await rpc.call("ports.list");
+  return Array.isArray(result) ? (result as PortInfoView[]) : [];
+}
+
+export async function getHostCapabilities(rpc: RpcClient): Promise<HostCapabilities> {
+  return (await rpc.call("host.capabilities")) as HostCapabilities;
+}
+
+export async function getSessionWorkspace(rpc: RpcClient): Promise<SessionWorkspaceBinding> {
+  return (await rpc.call("session.workspace")) as SessionWorkspaceBinding;
+}
+
+export async function listWorkspaces(rpc: RpcClient): Promise<WorkspaceSummary[]> {
+  const result = await rpc.call("workspaces.list");
+  return Array.isArray(result) ? (result as WorkspaceSummary[]) : [];
+}
+
+export async function cloneWorkspace(
+  rpc: RpcClient,
+  remoteUrl: string,
+): Promise<WorkspaceSummary> {
+  return (await rpc.call("workspaces.clone", { remoteUrl })) as WorkspaceSummary;
 }
