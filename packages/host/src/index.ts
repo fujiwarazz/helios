@@ -335,7 +335,17 @@ export interface ServeWorkspaceHostWsOptions {
   repositories: RepositoryService;
   port: number;
   host?: string;
+  /** Feature gate for Code launches and all Workspace mutation RPC. Defaults to true. */
+  codeMode?: boolean;
+  /** Whether a client may submit Host-local allowlisted paths. Defaults to true. */
+  allowLocalImport?: boolean;
   askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
+}
+
+export interface WorkspaceHostCapabilities {
+  codeMode: boolean;
+  localImport: boolean;
+  rollbackMode: "conversation-only";
 }
 
 export function serveWorkspaceHostOverWs(
@@ -356,6 +366,7 @@ export function serveWorkspaceHostOverWs(
     let request: { resumeSessionId?: string; launch?: SessionLaunchRequest };
     try {
       request = parseWorkspaceWsRequest(req.url);
+      assertCodeModeRequest(request, opts.codeMode ?? true);
     } catch (error) {
       conn.close(1008, error instanceof Error ? error.message : "invalid launch request");
       return;
@@ -417,6 +428,8 @@ export interface ServeWorkspaceHostElectronOptions {
   repositories: RepositoryService;
   bridge: ElectronIpcBridge;
   onConnect(handler: (req: ElectronConnectRequest) => Promise<void>): Disposable;
+  codeMode?: boolean;
+  allowLocalImport?: boolean;
   askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
 }
 
@@ -426,6 +439,7 @@ export function serveWorkspaceHostOverElectronIpc(
   const bindings = new Map<string, { dispose(): void }>();
   const connectSub = opts.onConnect(async (request) => {
     assertExclusiveWorkspaceRequest(request);
+    assertCodeModeRequest(request, opts.codeMode ?? true);
     const approvals = createApprovals();
     const askQuestion = opts.askQuestion ?? approvals.askQuestion;
     const bound = request.resumeSessionId
@@ -457,26 +471,45 @@ function bindWorkspaceSession(
     catalog: WorkspaceCatalog;
     sessions: SessionCatalog;
     repositories: RepositoryService;
+    codeMode?: boolean;
+    allowLocalImport?: boolean;
   },
 ): { dispose(): void } {
   let disposed = false;
+  const codeMode = services.codeMode ?? true;
+  const allowLocalImport = codeMode && (services.allowLocalImport ?? true);
+  const mutationHandlers: Record<string, RpcHandler> = codeMode
+    ? {
+        ...(allowLocalImport
+          ? {
+              "workspaces.importLocal": async (params: unknown) => {
+                const request = params as ImportLocalWorkspaceRequest;
+                return toWorkspaceSummary(
+                  await services.repositories.importLocalDirectory(request.path, request.name),
+                );
+              },
+            }
+          : {}),
+        "workspaces.clone": async (params: unknown) => {
+          const request = params as CloneWorkspaceRequest;
+          return toWorkspaceSummary(
+            await services.repositories.cloneRepository(request.remoteUrl, { name: request.name }),
+          );
+        },
+      }
+    : {};
   const binding = bindSession(bound.session, transport, bound.kernel, approvals, {
+    "host.capabilities": () =>
+      ({
+        codeMode,
+        localImport: allowLocalImport,
+        rollbackMode: "conversation-only",
+      }) satisfies WorkspaceHostCapabilities,
     "session.workspace": () => withoutRuntimeId(bound.binding),
     "sessions.list": () => services.sessions.list(),
     "workspaces.list": async () =>
       (await services.catalog.list()).map((workspace) => toWorkspaceSummary(workspace)),
-    "workspaces.importLocal": async (params) => {
-      const request = params as ImportLocalWorkspaceRequest;
-      return toWorkspaceSummary(
-        await services.repositories.importLocalDirectory(request.path, request.name),
-      );
-    },
-    "workspaces.clone": async (params) => {
-      const request = params as CloneWorkspaceRequest;
-      return toWorkspaceSummary(
-        await services.repositories.cloneRepository(request.remoteUrl, { name: request.name }),
-      );
-    },
+    ...mutationHandlers,
   });
   return {
     dispose(): void {
@@ -509,6 +542,15 @@ function assertExclusiveWorkspaceRequest(request: {
   }
   if (request.launch && request.launch.mode !== "chat" && request.launch.mode !== "code") {
     throw new Error("launch.mode must be chat or code");
+  }
+}
+
+function assertCodeModeRequest(
+  request: { launch?: SessionLaunchRequest },
+  codeMode: boolean,
+): void {
+  if (!codeMode && request.launch?.mode === "code") {
+    throw new Error("Code mode is disabled");
   }
 }
 

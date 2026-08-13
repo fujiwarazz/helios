@@ -118,6 +118,30 @@ describe("serveWorkspaceHostOverWs", () => {
     expect(release).toHaveBeenCalledWith(expect.stringMatching(/^runtime_/));
   });
 
+  it("advertises capabilities and disables workspace mutations with Code mode", async () => {
+    await handle.close();
+    handle = await serveWorkspaceHostOverWs({
+      registry,
+      catalog,
+      sessions,
+      repositories,
+      port: 0,
+      codeMode: false,
+      allowLocalImport: false,
+    });
+    const rpc = connect({ launch: { mode: "chat" } });
+
+    await expect(rpc.call("host.capabilities")).resolves.toEqual({
+      codeMode: false,
+      localImport: false,
+      rollbackMode: "conversation-only",
+    });
+    await expect(rpc.call("workspaces.clone", { remoteUrl: "git@host:org/repo.git" }))
+      .rejects.toThrow(/未知方法|method not found/i);
+    await expect(rpc.call("workspaces.importLocal", { path: allowedRoot }))
+      .rejects.toThrow(/未知方法|method not found/i);
+  });
+
   function connect(params: { launch?: unknown; resumeSessionId?: string }): RpcClient {
     const query = new URLSearchParams();
     if (params.launch) query.set("launch", JSON.stringify(params.launch));

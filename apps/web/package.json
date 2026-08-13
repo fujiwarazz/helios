@@ -14,6 +14,7 @@
     "@helios/ui-chat": "workspace:*",
     "@helios/protocol": "workspace:*",
     "@helios/host": "workspace:*",
+    "@helios/workspace": "workspace:*",
     "@helios/kernel": "workspace:*",
     "@helios/fs-node": "workspace:*",
     "@helios/llm-anthropic": "workspace:*",
