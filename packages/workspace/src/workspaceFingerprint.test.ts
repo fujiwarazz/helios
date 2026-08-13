@@ -23,4 +23,15 @@ describe("fingerprintWorkspace", () => {
     expect(second).not.toBe(first);
     expect(await fingerprintWorkspace(root)).toBe(second);
   });
+
+  it("excludes node_modules from Git workspaces", async () => {
+    await mkdir(join(root, ".git"));
+    await writeFile(join(root, "tracked.txt"), "tracked");
+    const beforeDependencies = await fingerprintWorkspace(root);
+
+    await mkdir(join(root, "node_modules"));
+    await writeFile(join(root, "node_modules", "dependency.js"), "generated");
+
+    expect(await fingerprintWorkspace(root)).toBe(beforeDependencies);
+  });
 });
