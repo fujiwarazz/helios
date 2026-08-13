@@ -13,6 +13,7 @@
     "@helios/kernel": "workspace:*",
     "@helios/protocol": "workspace:*",
     "@helios/ports": "workspace:*",
+    "@helios/workspace": "workspace:*",
     "ws": "^8.18.0"
   },
   "devDependencies": {

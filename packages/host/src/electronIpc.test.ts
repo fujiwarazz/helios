@@ -6,7 +6,7 @@
 // ============================================================================
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,16 @@ import type { Logger, Message, Disposable } from "@helios/ports";
 import { Kernel, type Manifest, type AgentEvent } from "@helios/kernel";
 import { RpcClient, electronRendererTransport, type ElectronIpcBridge } from "@helios/protocol";
 import { serveKernelOverElectronIpc, type ElectronConnectRequest } from "./index";
+import { serveWorkspaceHostOverElectronIpc } from "./index";
+import {
+  LocalRepositoryService,
+  LocalRuntimeRegistry,
+  LocalSessionCatalog,
+  LocalWorkspaceCatalog,
+  LocalWorkspaceMaterializer,
+  WorkspacePaths,
+  type SessionWorkspaceBinding,
+} from "@helios/workspace";
 
 const silent: Logger = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
 
@@ -151,5 +161,68 @@ describe("@helios/host serveKernelOverElectronIpc —— 与 serveKernelOverWs �
     rpcA.close();
     rpcB.close();
     handle.dispose();
+  });
+});
+
+describe("@helios/host serveWorkspaceHostOverElectronIpc", () => {
+  it("通过 launch DTO 绑定 Code Workspace 并使用全局 Session Catalog", async () => {
+    const dataRoot = await mkdtemp(join(tmpdir(), "helios-electron-workspace-state-"));
+    try {
+      const local = join(workDir, "repo");
+      await mkdir(local);
+      const paths = new WorkspacePaths(dataRoot);
+      const catalog = new LocalWorkspaceCatalog(paths);
+      const sessions = new LocalSessionCatalog(paths);
+      const repositories = new LocalRepositoryService({
+        catalog,
+        paths,
+        allowedRoots: [workDir],
+      });
+      const workspace = await repositories.importLocalDirectory(local);
+      const registry = new LocalRuntimeRegistry({
+        paths,
+        catalog,
+        sessions,
+        materializer: new LocalWorkspaceMaterializer({ paths }),
+        manifest: {
+          plugins: [
+            { port: "FileSystemPort", package: "@helios/fs-node" },
+            { port: "LLMProvider", package: fixture("mockLlmTextOnly.ts") },
+          ],
+        },
+        logger: silent,
+      });
+      const { main, renderer } = makeLinkedBridges();
+      const { onConnect, dispatch } = makeConnectChannel();
+      const handle = serveWorkspaceHostOverElectronIpc({
+        registry,
+        catalog,
+        sessions,
+        repositories,
+        bridge: main,
+        onConnect,
+      });
+      const connectionId = "workspace-conn";
+      await dispatch({
+        connectionId,
+        launch: {
+          mode: "code",
+          workspaceId: workspace.id,
+          roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" }],
+        },
+      });
+      const rpc = new RpcClient(() => electronRendererTransport(renderer, connectionId));
+
+      const binding = (await rpc.call("session.workspace")) as SessionWorkspaceBinding;
+      expect(binding.workspaceId).toBe(workspace.id);
+      expect(await rpc.call("sessions.list")).toEqual([]);
+      await rpc.call("sendMessage", { text: "electron code" });
+      expect(await rpc.call("sessions.list")).toHaveLength(1);
+
+      rpc.close();
+      handle.dispose();
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
   });
 });

@@ -14,7 +14,21 @@ import {
   electronMainTransport,
   type Transport,
   type ElectronIpcBridge,
+  type RpcHandler,
 } from "@helios/protocol";
+import type {
+  BoundSession,
+  CloneWorkspaceRequest,
+  ImportLocalWorkspaceRequest,
+  RepositoryService,
+  RuntimeRegistry,
+  SessionCatalog,
+  SessionLaunchRequest,
+  SessionWorkspaceBinding,
+  Workspace,
+  WorkspaceCatalog,
+  WorkspaceSummary,
+} from "@helios/workspace";
 
 /**
  * 每连接一个交互式审批器：AskUserQuestion 走这里 → 广播 ask 事件给前端 →
@@ -115,6 +129,7 @@ export function bindSession(
   transport: Transport,
   kernel: Kernel,
   approvals?: Approvals,
+  extraHandlers: Record<string, RpcHandler> = {},
 ): { server: RpcServer; dispose(): void } {
   const server = new RpcServer(transport, {
     sessionId: () => session.id,
@@ -127,6 +142,7 @@ export function bindSession(
     // 内核级只读 RPC（会话侧无关，但复用同一连接的 RpcServer 派发）
     "sessions.list": () => kernel.listSessions(),
     "ports.list": () => kernel.listPorts(),
+    ...extraHandlers,
   });
   approvals?.attach(
     (channel, payload) => server.broadcast(channel, payload, session.id),
@@ -247,6 +263,8 @@ export interface ElectronConnectRequest {
   connectionId: string;
   /** 有则 resume 该历史会话，无则新建（与 serveKernelOverWs 的 `?session=` 语义一致）。 */
   resumeSessionId?: string;
+  /** Workspace Host 新会话的稳定 ID 选择；与 resumeSessionId 互斥。 */
+  launch?: SessionLaunchRequest;
 }
 
 export interface ServeElectronIpcOptions {
@@ -308,4 +326,206 @@ export function serveKernelOverElectronIpc(opts: ServeElectronIpcOptions): Elect
       bindings.clear();
     },
   };
+}
+
+export interface ServeWorkspaceHostWsOptions {
+  registry: RuntimeRegistry;
+  catalog: WorkspaceCatalog;
+  sessions: SessionCatalog;
+  repositories: RepositoryService;
+  port: number;
+  host?: string;
+  askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
+}
+
+export function serveWorkspaceHostOverWs(
+  opts: ServeWorkspaceHostWsOptions,
+): Promise<ServeHandle> {
+  const wss = new WebSocketServer({ port: opts.port, host: opts.host });
+  const bindings = new Set<{ dispose(): void }>();
+
+  wss.on("connection", (conn: NodeWebSocket, req: IncomingMessage) => {
+    const approvals = createApprovals();
+    const askQuestion = opts.askQuestion ?? approvals.askQuestion;
+    const early: unknown[] = [];
+    const bufferEarly = (data: unknown): void => {
+      early.push(data);
+    };
+    conn.on("message", bufferEarly);
+
+    let request: { resumeSessionId?: string; launch?: SessionLaunchRequest };
+    try {
+      request = parseWorkspaceWsRequest(req.url);
+    } catch (error) {
+      conn.close(1008, error instanceof Error ? error.message : "invalid launch request");
+      return;
+    }
+    const boundPromise = request.resumeSessionId
+      ? opts.registry.resumeSession(request.resumeSessionId, { askQuestion })
+      : opts.registry.createSession(request.launch ?? { mode: "chat" }, { askQuestion });
+
+    let disposed = false;
+    let binding: { dispose(): void } | undefined;
+    conn.on("close", () => {
+      disposed = true;
+      if (binding) {
+        binding.dispose();
+        bindings.delete(binding);
+      }
+    });
+
+    void boundPromise
+      .then((bound) => {
+        if (disposed) {
+          void bound.session.dispose();
+          void opts.registry.release(bound.binding.runtimeId!);
+          return;
+        }
+        const transport = nodeWsServerTransport(conn);
+        binding = bindWorkspaceSession(bound, transport, approvals, opts);
+        bindings.add(binding);
+        conn.off("message", bufferEarly);
+        for (const data of early) conn.emit("message", data);
+      })
+      .catch((error) => {
+        conn.close(1011, error instanceof Error ? error.message : "workspace session init failed");
+      });
+  });
+
+  return new Promise<ServeHandle>((resolve, reject) => {
+    wss.once("error", reject);
+    wss.once("listening", () => {
+      const address = wss.address();
+      const port = typeof address === "object" && address ? address.port : opts.port;
+      resolve({
+        port,
+        close: () =>
+          new Promise<void>((done) => {
+            for (const binding of bindings) binding.dispose();
+            bindings.clear();
+            wss.close(() => done());
+          }),
+      });
+    });
+  });
+}
+
+export interface ServeWorkspaceHostElectronOptions {
+  registry: RuntimeRegistry;
+  catalog: WorkspaceCatalog;
+  sessions: SessionCatalog;
+  repositories: RepositoryService;
+  bridge: ElectronIpcBridge;
+  onConnect(handler: (req: ElectronConnectRequest) => Promise<void>): Disposable;
+  askQuestion?: (req: AskQuestionRequest) => Promise<AskQuestionResponse>;
+}
+
+export function serveWorkspaceHostOverElectronIpc(
+  opts: ServeWorkspaceHostElectronOptions,
+): ElectronIpcServeHandle {
+  const bindings = new Map<string, { dispose(): void }>();
+  const connectSub = opts.onConnect(async (request) => {
+    assertExclusiveWorkspaceRequest(request);
+    const approvals = createApprovals();
+    const askQuestion = opts.askQuestion ?? approvals.askQuestion;
+    const bound = request.resumeSessionId
+      ? await opts.registry.resumeSession(request.resumeSessionId, { askQuestion })
+      : await opts.registry.createSession(request.launch ?? { mode: "chat" }, { askQuestion });
+    const transport = electronMainTransport(opts.bridge, request.connectionId);
+    const binding = bindWorkspaceSession(bound, transport, approvals, opts);
+    bindings.set(request.connectionId, binding);
+    transport.onClose(() => {
+      binding.dispose();
+      bindings.delete(request.connectionId);
+    });
+  });
+  return {
+    dispose(): void {
+      connectSub.dispose();
+      for (const binding of bindings.values()) binding.dispose();
+      bindings.clear();
+    },
+  };
+}
+
+function bindWorkspaceSession(
+  bound: BoundSession,
+  transport: Transport,
+  approvals: Approvals,
+  services: {
+    registry: RuntimeRegistry;
+    catalog: WorkspaceCatalog;
+    sessions: SessionCatalog;
+    repositories: RepositoryService;
+  },
+): { dispose(): void } {
+  let disposed = false;
+  const binding = bindSession(bound.session, transport, bound.kernel, approvals, {
+    "session.workspace": () => withoutRuntimeId(bound.binding),
+    "sessions.list": () => services.sessions.list(),
+    "workspaces.list": async () =>
+      (await services.catalog.list()).map((workspace) => toWorkspaceSummary(workspace)),
+    "workspaces.importLocal": async (params) => {
+      const request = params as ImportLocalWorkspaceRequest;
+      return toWorkspaceSummary(
+        await services.repositories.importLocalDirectory(request.path, request.name),
+      );
+    },
+    "workspaces.clone": async (params) => {
+      const request = params as CloneWorkspaceRequest;
+      return toWorkspaceSummary(
+        await services.repositories.cloneRepository(request.remoteUrl, { name: request.name }),
+      );
+    },
+  });
+  return {
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      binding.dispose();
+      void services.registry.release(bound.binding.runtimeId!);
+    },
+  };
+}
+
+function parseWorkspaceWsRequest(
+  requestUrl: string | undefined,
+): { resumeSessionId?: string; launch?: SessionLaunchRequest } {
+  const url = new URL(requestUrl ?? "/", "ws://localhost");
+  const resumeSessionId = url.searchParams.get("resumeSessionId") ?? undefined;
+  const launchRaw = url.searchParams.get("launch");
+  const launch = launchRaw ? (JSON.parse(launchRaw) as SessionLaunchRequest) : undefined;
+  const request = { resumeSessionId, launch };
+  assertExclusiveWorkspaceRequest(request);
+  return request;
+}
+
+function assertExclusiveWorkspaceRequest(request: {
+  resumeSessionId?: string;
+  launch?: SessionLaunchRequest;
+}): void {
+  if (request.resumeSessionId && request.launch) {
+    throw new Error("resumeSessionId and launch are mutually exclusive");
+  }
+  if (request.launch && request.launch.mode !== "chat" && request.launch.mode !== "code") {
+    throw new Error("launch.mode must be chat or code");
+  }
+}
+
+function toWorkspaceSummary(workspace: Workspace): WorkspaceSummary {
+  return {
+    id: workspace.id,
+    name: workspace.name,
+    kind: workspace.kind,
+    roots: workspace.roots.map((root) => ({
+      id: root.id,
+      displayName: root.displayName,
+      git: root.git !== undefined,
+    })),
+  };
+}
+
+function withoutRuntimeId(binding: BoundSession["binding"]): SessionWorkspaceBinding {
+  const { runtimeId: _runtimeId, ...persisted } = binding;
+  return persisted;
 }

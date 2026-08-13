@@ -295,6 +295,9 @@ importers:
       '@helios/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@helios/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       ws:
         specifier: ^8.18.0
         version: 8.21.1
