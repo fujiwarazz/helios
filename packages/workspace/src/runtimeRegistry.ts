@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Kernel,
   type CreateSessionOptions,
@@ -14,6 +14,8 @@ import type { WorkspaceMaterializer } from "./materializer";
 import { WorkspacePaths } from "./paths";
 import { ExecaGitRunner, type GitRunner } from "./repositoryService";
 import type { SessionCatalog } from "./sessionCatalog";
+import type { LocalEditRecordStore } from "./editRecordStore";
+import type { LocalMutationCoordinator } from "./mutationCoordinator";
 import type {
   MaterializedWorkspace,
   SessionLaunchRequest,
@@ -51,6 +53,8 @@ export interface LocalRuntimeRegistryOptions {
   draftTtlMs?: number;
   idFactory?: (prefix: "sess" | "mat" | "runtime") => string;
   kernelFactory?: (options: KernelOptions) => Kernel;
+  editRecords?: LocalEditRecordStore;
+  mutations?: LocalMutationCoordinator;
 }
 
 interface RuntimeEntry {
@@ -93,6 +97,8 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
   private readonly runtimes = new Map<string, RuntimeEntry>();
   private readonly runtimeKeysById = new Map<string, string>();
   private readonly drafts = new Map<string, DraftEntry>();
+  private readonly editRecords?: LocalEditRecordStore;
+  private readonly mutations?: LocalMutationCoordinator;
 
   constructor(options: LocalRuntimeRegistryOptions) {
     this.paths = options.paths;
@@ -106,6 +112,8 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
     this.draftTtlMs = options.draftTtlMs ?? 15 * 60_000;
     this.idFactory = options.idFactory ?? ((prefix) => `${prefix}_${randomUUID()}`);
     this.kernelFactory = options.kernelFactory ?? ((kernelOptions) => new Kernel(kernelOptions));
+    this.editRecords = options.editRecords;
+    this.mutations = options.mutations;
   }
 
   async createSession(
@@ -146,6 +154,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
         await this.sessions.updateState(sessionId, state);
         await options.onRunStateChange?.(state);
       },
+      ...this.auditOptions(sessionId, workspace, binding, materialized),
     });
     this.drafts.set(sessionId, {
       sessionId,
@@ -182,6 +191,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
           await this.sessions.updateState(sessionId, state);
           await options.onRunStateChange?.(state);
         },
+        ...this.auditOptions(sessionId, workspace, binding, materialized),
       });
       return { kernel: runtime.kernel, session, binding, materialized };
     } catch (error) {
@@ -306,6 +316,60 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
     return runtime;
   }
 
+  private auditOptions(
+    sessionId: string,
+    workspace: Workspace,
+    binding: SessionWorkspaceBinding,
+    materialized: MaterializedWorkspace,
+  ): Pick<
+    CreateSessionOptions,
+    "recordEdit" | "markAuditGap" | "acquireMutationLease" | "rollbackPolicy"
+  > {
+    const rootBinding = binding.roots[0]!;
+    const root = materialized.roots[0]!;
+    return {
+      rollbackPolicy: "conversation-only",
+      recordEdit: this.editRecords
+        ? async (edit) => {
+            const relativePath = relativeWithin(root.absolutePath, edit.path);
+            const record = {
+              schemaVersion: 1 as const,
+              id: `edit_${randomUUID()}`,
+              sessionId,
+              workspaceId: workspace.id,
+              rootId: root.rootId,
+              toolUseId: edit.toolUseId,
+              relativePath,
+              operation: edit.operation,
+              before: edit.before,
+              after: edit.after,
+              createdAt: this.now(),
+            };
+            await this.editRecords!.append(record);
+            return {
+              workspaceId: workspace.id,
+              rootId: root.rootId,
+              relativePath,
+              before: edit.before,
+              after: edit.after,
+            };
+          }
+        : undefined,
+      markAuditGap: async (gap) => this.sessions.appendAuditGap(sessionId, gap),
+      acquireMutationLease:
+        this.mutations && rootBinding.strategy === "direct"
+          ? (runId) =>
+              this.mutations!.acquire({
+                workspaceId: workspace.id,
+                materializationId: rootBinding.materializationId,
+                rootPath: root.absolutePath,
+                sessionId,
+                runId,
+              })
+          : undefined,
+    };
+  }
+
   private async removeDraftFiles(draft: DraftEntry): Promise<void> {
     for (const rootBinding of draft.binding.roots) {
       if (rootBinding.strategy !== "worktree") continue;
@@ -327,6 +391,16 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       await rm(this.paths.managedRoot(draft.workspace.id), { recursive: true, force: true });
     }
   }
+}
+
+function relativeWithin(root: string, path: string): string {
+  const absolute = isAbsolute(path) ? resolve(path) : resolve(root, path);
+  const result = relative(resolve(root), absolute);
+  if (!result || result === ".." || result.startsWith(`..${sep}`) || isAbsolute(result)) {
+    if (result === "") throw new Error("edit path must identify a file below the workspace root");
+    throw new Error(`edit path escapes workspace root: ${path}`);
+  }
+  return result;
 }
 
 function manifestForWorkspace(manifest: Manifest, storageDir: string): Manifest {

@@ -6,6 +6,8 @@ import type { AskQuestionRequest, AskQuestionResponse, Logger } from "@helios/po
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LocalWorkspaceCatalog } from "./catalog";
 import { LocalWorkspaceMaterializer } from "./materializer";
+import { LocalEditRecordStore } from "./editRecordStore";
+import { LocalMutationCoordinator } from "./mutationCoordinator";
 import { WorkspacePaths } from "./paths";
 import { LocalRepositoryService } from "./repositoryService";
 import { LocalRuntimeRegistry } from "./runtimeRegistry";
@@ -25,6 +27,8 @@ describe("LocalRuntimeRegistry", () => {
   let repositories: LocalRepositoryService;
   let now: number;
   let nextId: number;
+  let editRecords: LocalEditRecordStore;
+  let mutations: LocalMutationCoordinator;
 
   beforeEach(async () => {
     dataRoot = await mkdtemp(join(tmpdir(), "helios-runtime-state-"));
@@ -35,6 +39,8 @@ describe("LocalRuntimeRegistry", () => {
     repositories = new LocalRepositoryService({ catalog, paths, allowedRoots: [allowedRoot] });
     now = 100;
     nextId = 0;
+    editRecords = new LocalEditRecordStore(paths);
+    mutations = new LocalMutationCoordinator(paths, () => now);
   });
 
   afterEach(async () => {
@@ -144,16 +150,52 @@ describe("LocalRuntimeRegistry", () => {
     await expect(access(committedRoot)).resolves.toBeUndefined();
   });
 
-  function createRegistry(): LocalRuntimeRegistry {
+  it("binds successful Write edits and mutation revisions to the committed session", async () => {
+    const local = join(allowedRoot, "audited-repo");
+    await mkdir(local);
+    const workspace = await repositories.importLocalDirectory(local);
+    const registry = createRegistry("mockLlmWrite.ts");
+    const bound = await registry.createSession(
+      {
+        mode: "code",
+        workspaceId: workspace.id,
+        roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" }],
+      },
+      { askQuestion: noAsk },
+    );
+
+    await bound.session.sendMessage("write a file");
+
+    expect(await editRecords.list(bound.session.id)).toEqual([
+      expect.objectContaining({
+        schemaVersion: 1,
+        sessionId: bound.session.id,
+        workspaceId: workspace.id,
+        rootId: workspace.roots[0]!.id,
+        toolUseId: "w1",
+        relativePath: "roll.txt",
+        operation: "create",
+        after: "after-turn\n",
+      }),
+    ]);
+    expect(await sessions.get(bound.session.id)).toMatchObject({ auditStatus: "complete" });
+    await expect(
+      access(paths.mutationLog(workspace.id, `direct-${workspace.roots[0]!.id}`)),
+    ).resolves.toBeUndefined();
+  });
+
+  function createRegistry(llmFixture = "mockLlmTextOnly.ts"): LocalRuntimeRegistry {
     return new LocalRuntimeRegistry({
       paths,
       catalog,
       sessions,
       materializer: new LocalWorkspaceMaterializer({ paths }),
+      editRecords,
+      mutations,
       manifest: {
         plugins: [
           { port: "FileSystemPort", package: "@helios/fs-node" },
-          { port: "LLMProvider", package: fixture("mockLlmTextOnly.ts") },
+          { port: "LLMProvider", package: fixture(llmFixture) },
         ],
       },
       logger: silent,

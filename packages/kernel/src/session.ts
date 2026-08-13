@@ -56,6 +56,7 @@ export interface SessionOptions {
   onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
   recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
   markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  acquireMutationLease?: (runId: string) => Promise<() => Promise<void>>;
   rollbackPolicy?: "full" | "conversation-only";
 }
 
@@ -260,9 +261,12 @@ export class Session {
       await this.opts.beforeFirstRun?.(text);
       this.firstRunPrepared = true;
     }
+    const runId = uid("run");
+    let releaseMutationLease: (() => Promise<void>) | undefined;
     await this.setRunState("running");
     let runCompleted = false;
     try {
+    releaseMutationLease = await this.opts.acquireMutationLease?.(runId);
 
     // SessionStart：懒触发，仅首次 sendMessage() 调用一次（对齐 valos session.start() 内触发时机）。
     if (!this.sessionStarted) {
@@ -275,7 +279,6 @@ export class Session {
       this.sessionStartContext = startDecision.additionalContext;
     }
 
-    const runId = uid("run");
     const runIndex = this.runIndex++;
     if (!this.title) this.title = text.slice(0, 60);
 
@@ -380,6 +383,7 @@ export class Session {
     } finally {
       this.currentAbort = null;
       await this.setRunState(runCompleted ? "idle" : "interrupted");
+      await releaseMutationLease?.();
     }
   }
 

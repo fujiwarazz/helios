@@ -23,22 +23,29 @@ export class LocalMutationCoordinator {
   ) {}
 
   async run<T>(context: MutationRunContext, operation: () => Promise<T>): Promise<T> {
+    const release = await this.acquire(context);
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
+  }
+
+  async acquire(context: MutationRunContext): Promise<() => Promise<void>> {
     const key = realpathSync(context.rootPath);
-    return this.withLock(key, async () => {
-      const beforeFingerprint = await fingerprintWorkspace(key);
-      let result: T;
-      let failure: unknown;
+    const releaseLock = await this.acquireLock(key);
+    const beforeFingerprint = await fingerprintWorkspace(key);
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
       try {
-        result = await operation();
-      } catch (error) {
-        failure = error;
-        result = undefined as T;
+        const afterFingerprint = await fingerprintWorkspace(key);
+        await this.appendJournal(context, beforeFingerprint, afterFingerprint);
+      } finally {
+        releaseLock();
       }
-      const afterFingerprint = await fingerprintWorkspace(key);
-      await this.appendJournal(context, beforeFingerprint, afterFingerprint);
-      if (failure !== undefined) throw failure;
-      return result;
-    });
+    };
   }
 
   private async appendJournal(
@@ -63,7 +70,7 @@ export class LocalMutationCoordinator {
     await appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
   }
 
-  private async withLock<T>(key: string, operation: () => Promise<T>): Promise<T> {
+  private async acquireLock(key: string): Promise<() => void> {
     const previous = this.locks.get(key) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -72,12 +79,10 @@ export class LocalMutationCoordinator {
     const barrier = previous.catch(() => undefined).then(() => current);
     this.locks.set(key, barrier);
     await previous.catch(() => undefined);
-    try {
-      return await operation();
-    } finally {
+    return () => {
       release();
       if (this.locks.get(key) === barrier) this.locks.delete(key);
-    }
+    };
   }
 }
 

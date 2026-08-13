@@ -65,6 +65,7 @@ export interface CreateSessionOptions {
   onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
   recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
   markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  acquireMutationLease?: (runId: string) => Promise<() => Promise<void>>;
   rollbackPolicy?: "full" | "conversation-only";
 }
 
@@ -187,6 +188,7 @@ export class Kernel {
       onRunStateChange: opts.onRunStateChange,
       recordEdit: opts.recordEdit,
       markAuditGap: opts.markAuditGap,
+      acquireMutationLease: opts.acquireMutationLease,
       rollbackPolicy: opts.rollbackPolicy,
     });
   }
