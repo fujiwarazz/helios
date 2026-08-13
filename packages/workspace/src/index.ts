@@ -6,6 +6,14 @@ export {
   type LocalWorkspaceCatalogOptions,
   type WorkspaceCatalog,
 } from "./catalog";
+export {
+  ExecaGitRunner,
+  LocalRepositoryService,
+  type GitRunner,
+  type GitRunOptions,
+  type LocalRepositoryServiceOptions,
+  type RepositoryService,
+} from "./repositoryService";
 export type {
   CloneWorkspaceRequest,
   EditRecord,

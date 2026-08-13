@@ -9,5 +9,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "execa": "^9.5.2"
   }
 }
