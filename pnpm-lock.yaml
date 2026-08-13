@@ -56,6 +56,9 @@ importers:
       '@helios/teams-mailbox':
         specifier: workspace:*
         version: link:../../packages/teams-mailbox
+      '@helios/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
 
   apps/electron:
     dependencies:
