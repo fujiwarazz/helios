@@ -70,7 +70,7 @@ Git Clone 不持久化凭据。HTTPS 使用系统 credential helper，SSH 使用
     edits.jsonl
 ```
 
-文件属于 Workspace；消息、turn、编辑记录与审计状态按 `sessionId` 隔离。当前 Write/Edit 会写入逐文件 EditRecord；Bash、格式化器或外部进程造成的文件变化暂不能完整归因到 `toolUseId`，因此编辑日志不是安全边界。
+文件属于 Workspace；消息、turn、编辑记录与审计状态按 `sessionId` 隔离。当前 Write/Edit 会写入逐文件 EditRecord；direct Workspace 会在每次 Agent run 前后记录 fingerprint，检测到 Helios 之外的修改时把会话标记为审计不完整。Workspace Runtime 暂时禁用 Bash，因为仅设置 cwd 不能限制任意 shell 命令越过 Workspace 边界；完成 Sandbox confinement 与外部进程审计后再开放。
 
 ## 开发验证
 

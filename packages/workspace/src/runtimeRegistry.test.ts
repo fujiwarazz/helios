@@ -1,15 +1,19 @@
-import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AskQuestionRequest, AskQuestionResponse, Logger } from "@helios/ports";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { LocalWorkspaceCatalog } from "./catalog";
-import { LocalWorkspaceMaterializer } from "./materializer";
+import {
+  LocalWorkspaceMaterializer,
+  type MaterializeOptions,
+  type WorkspaceMaterializer,
+} from "./materializer";
 import { LocalEditRecordStore } from "./editRecordStore";
 import { LocalMutationCoordinator } from "./mutationCoordinator";
 import { WorkspacePaths } from "./paths";
-import { LocalRepositoryService } from "./repositoryService";
+import { ExecaGitRunner, LocalRepositoryService } from "./repositoryService";
 import { LocalRuntimeRegistry } from "./runtimeRegistry";
 import { LocalSessionCatalog } from "./sessionCatalog";
 
@@ -182,6 +186,103 @@ describe("LocalRuntimeRegistry", () => {
     ).rejects.toMatchObject({ code: "WORKSPACE_UNAVAILABLE" });
   });
 
+  it("passes cancellation and timeout controls to workspace materialization", async () => {
+    const local = join(allowedRoot, "controlled-repo");
+    await mkdir(local);
+    const workspace = await repositories.importLocalDirectory(local);
+    const delegate = new LocalWorkspaceMaterializer({ paths });
+    let received: MaterializeOptions | undefined;
+    const materializer: WorkspaceMaterializer = {
+      materialize: async (target, binding, options) => {
+        received = options;
+        return delegate.materialize(target, binding, options);
+      },
+    };
+    const registry = createRegistry("mockLlmTextOnly.ts", materializer);
+    const signal = new AbortController().signal;
+
+    await registry.createSession(
+      {
+        mode: "code",
+        workspaceId: workspace.id,
+        roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" }],
+      },
+      { askQuestion: noAsk, materialize: { signal, timeoutMs: 4_321 } },
+    );
+
+    expect(received).toEqual({ signal, timeoutMs: 4_321 });
+  });
+
+  it("pins worktree bindings to the selected source revision", async () => {
+    const local = join(allowedRoot, "pinned-repo");
+    await mkdir(local);
+    const git = new ExecaGitRunner();
+    await git.run(["init", "-b", "main"], { cwd: local });
+    await git.run(["config", "user.email", "helios@example.com"], { cwd: local });
+    await git.run(["config", "user.name", "Helios Test"], { cwd: local });
+    await writeFile(join(local, "README.md"), "initial\n");
+    await git.run(["add", "README.md"], { cwd: local });
+    await git.run(["commit", "-m", "initial"], { cwd: local });
+    const revision = (await git.run(["rev-parse", "HEAD"], { cwd: local })).stdout;
+    const workspace = await repositories.importLocalDirectory(local);
+
+    const bound = await createRegistry().createSession(
+      {
+        mode: "code",
+        workspaceId: workspace.id,
+        roots: [{ rootId: workspace.roots[0]!.id, strategy: "worktree" }],
+      },
+      { askQuestion: noAsk },
+    );
+
+    expect(bound.binding.roots[0]?.revision).toBe(revision);
+  });
+
+  it("removes a new worktree and branch when runtime startup fails", async () => {
+    const local = join(allowedRoot, "failed-runtime-repo");
+    await mkdir(local);
+    const git = new ExecaGitRunner();
+    await git.run(["init", "-b", "main"], { cwd: local });
+    await git.run(["config", "user.email", "helios@example.com"], { cwd: local });
+    await git.run(["config", "user.name", "Helios Test"], { cwd: local });
+    await writeFile(join(local, "README.md"), "initial\n");
+    await git.run(["add", "README.md"], { cwd: local });
+    await git.run(["commit", "-m", "initial"], { cwd: local });
+    const workspace = await repositories.importLocalDirectory(local);
+    const registry = new LocalRuntimeRegistry({
+      paths,
+      catalog,
+      sessions,
+      materializer: new LocalWorkspaceMaterializer({ paths }),
+      manifest: {
+        plugins: [{ port: "FileSystemPort", package: "file:///missing-helios-plugin.ts" }],
+      },
+      idFactory: (prefix) => `${prefix}_cleanup`,
+    });
+
+    await expect(
+      registry.createSession(
+        {
+          mode: "code",
+          workspaceId: workspace.id,
+          roots: [{ rootId: workspace.roots[0]!.id, strategy: "worktree" }],
+        },
+        { askQuestion: noAsk },
+      ),
+    ).rejects.toBeDefined();
+
+    await expect(
+      access(paths.worktreeRoot(workspace.id, "mat_cleanup", workspace.roots[0]!.id)),
+    ).rejects.toBeDefined();
+    expect((await git.run(["branch", "--list", "helios/mat_cleanup"], { cwd: local })).stdout).toBe(
+      "",
+    );
+    expect((await git.run(["worktree", "list", "--porcelain"], { cwd: local })).stdout).not.toContain(
+      "mat_cleanup",
+    );
+    await expect(catalog.get(workspace.id)).resolves.toBeDefined();
+  });
+
   it("removes an uncommitted Chat draft when its runtime is released", async () => {
     const registry = createRegistry();
     const draft = await registry.createSession({ mode: "chat" }, { askQuestion: noAsk });
@@ -240,12 +341,40 @@ describe("LocalRuntimeRegistry", () => {
     ).resolves.toBeUndefined();
   });
 
-  function createRegistry(llmFixture = "mockLlmTextOnly.ts"): LocalRuntimeRegistry {
+  it("marks an audit warning when a direct workspace changed between runs", async () => {
+    const local = join(allowedRoot, "externally-edited-repo");
+    await mkdir(local);
+    const workspace = await repositories.importLocalDirectory(local);
+    const registry = createRegistry();
+    const launch = {
+      mode: "code" as const,
+      workspaceId: workspace.id,
+      roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" as const }],
+    };
+    const first = await registry.createSession(launch, { askQuestion: noAsk });
+    await first.session.sendMessage("establish fingerprint");
+    await writeFile(join(local, "external.txt"), "changed outside Helios");
+
+    const second = await registry.createSession(launch, { askQuestion: noAsk });
+    await second.session.sendMessage("detect external edit");
+
+    expect(await sessions.get(second.session.id)).toMatchObject({
+      auditStatus: "incomplete",
+      auditGaps: [
+        expect.objectContaining({ reason: expect.stringMatching(/outside Helios/i) }),
+      ],
+    });
+  });
+
+  function createRegistry(
+    llmFixture = "mockLlmTextOnly.ts",
+    materializer: WorkspaceMaterializer = new LocalWorkspaceMaterializer({ paths }),
+  ): LocalRuntimeRegistry {
     return new LocalRuntimeRegistry({
       paths,
       catalog,
       sessions,
-      materializer: new LocalWorkspaceMaterializer({ paths }),
+      materializer,
       editRecords,
       mutations,
       manifest: {

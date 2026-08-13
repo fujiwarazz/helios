@@ -22,6 +22,7 @@ import {
   LocalWorkspaceCatalog,
   LocalWorkspaceMaterializer,
   WorkspacePaths,
+  type RuntimeRegistry,
   type SessionWorkspaceBinding,
 } from "@helios/workspace";
 
@@ -165,6 +166,46 @@ describe("@helios/host serveKernelOverElectronIpc —— 与 serveKernelOverWs �
 });
 
 describe("@helios/host serveWorkspaceHostOverElectronIpc", () => {
+  it("cancels pending materialization when the renderer disconnects", async () => {
+    const dataRoot = await mkdtemp(join(tmpdir(), "helios-electron-pending-state-"));
+    try {
+      const paths = new WorkspacePaths(dataRoot);
+      const catalog = new LocalWorkspaceCatalog(paths);
+      const sessions = new LocalSessionCatalog(paths);
+      const repositories = new LocalRepositoryService({ catalog, paths, allowedRoots: [] });
+      let signal: AbortSignal | undefined;
+      const registry = {
+        createSession: (_request, options) => {
+          signal = options.materialize?.signal;
+          return new Promise(() => undefined);
+        },
+        resumeSession: () => new Promise(() => undefined),
+        release: async () => undefined,
+        scavengeExpiredDrafts: async () => 0,
+      } satisfies RuntimeRegistry;
+      const { main, renderer } = makeLinkedBridges();
+      const { onConnect, dispatch } = makeConnectChannel();
+      const handle = serveWorkspaceHostOverElectronIpc({
+        registry,
+        catalog,
+        sessions,
+        repositories,
+        bridge: main,
+        onConnect,
+      });
+
+      void dispatch({ connectionId: "pending-connection", launch: { mode: "chat" } });
+      await waitFor(() => signal !== undefined, 2_000);
+      renderer.close("pending-connection");
+      await waitFor(() => signal?.aborted === true, 2_000);
+
+      expect(signal?.aborted).toBe(true);
+      handle.dispose();
+    } finally {
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("通过 launch DTO 绑定 Code Workspace 并使用全局 Session Catalog", async () => {
     const dataRoot = await mkdtemp(join(tmpdir(), "helios-electron-workspace-state-"));
     try {

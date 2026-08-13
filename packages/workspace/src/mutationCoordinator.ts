@@ -11,11 +11,18 @@ export interface MutationRunContext {
   rootPath: string;
   sessionId: string;
   runId: string;
+  onExternalModification?: (warning: ExternalModificationWarning) => Promise<void>;
+}
+
+export interface ExternalModificationWarning {
+  expectedFingerprint: string;
+  actualFingerprint: string;
 }
 
 export class LocalMutationCoordinator {
   private readonly locks = new Map<string, Promise<void>>();
   private readonly revisions = new Map<string, number>();
+  private readonly afterFingerprints = new Map<string, string>();
 
   constructor(
     private readonly paths: WorkspacePaths,
@@ -34,14 +41,38 @@ export class LocalMutationCoordinator {
   async acquire(context: MutationRunContext): Promise<() => Promise<void>> {
     const key = realpathSync(context.rootPath);
     const releaseLock = await this.acquireLock(key);
-    const beforeFingerprint = await fingerprintWorkspace(key);
+    let beforeFingerprint: string;
+    let externalModification = false;
+    try {
+      beforeFingerprint = await fingerprintWorkspace(key);
+      const file = this.paths.mutationLog(context.workspaceId, context.materializationId);
+      const previous = await this.previousJournalState(file);
+      if (
+        previous.afterFingerprint !== undefined &&
+        previous.afterFingerprint !== beforeFingerprint
+      ) {
+        externalModification = true;
+        await context.onExternalModification?.({
+          expectedFingerprint: previous.afterFingerprint,
+          actualFingerprint: beforeFingerprint,
+        });
+      }
+    } catch (error) {
+      releaseLock();
+      throw error;
+    }
     let released = false;
     return async () => {
       if (released) return;
       released = true;
       try {
         const afterFingerprint = await fingerprintWorkspace(key);
-        await this.appendJournal(context, beforeFingerprint, afterFingerprint);
+        await this.appendJournal(
+          context,
+          beforeFingerprint,
+          afterFingerprint,
+          externalModification,
+        );
       } finally {
         releaseLock();
       }
@@ -52,6 +83,7 @@ export class LocalMutationCoordinator {
     context: MutationRunContext,
     beforeFingerprint: string,
     afterFingerprint: string,
+    externalModification: boolean,
   ): Promise<void> {
     const file = this.paths.mutationLog(context.workspaceId, context.materializationId);
     const previous = this.revisions.get(file) ?? (await readLastRevision(file));
@@ -64,10 +96,28 @@ export class LocalMutationCoordinator {
       runId: context.runId,
       beforeFingerprint,
       afterFingerprint,
+      ...(externalModification ? { externalModification: true } : {}),
       createdAt: this.now(),
     };
     await mkdir(dirname(file), { recursive: true });
     await appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
+    this.afterFingerprints.set(file, afterFingerprint);
+  }
+
+  private async previousJournalState(
+    file: string,
+  ): Promise<{ revision: number; afterFingerprint?: string }> {
+    const cachedRevision = this.revisions.get(file);
+    const cachedFingerprint = this.afterFingerprints.get(file);
+    if (cachedRevision !== undefined && cachedFingerprint !== undefined) {
+      return { revision: cachedRevision, afterFingerprint: cachedFingerprint };
+    }
+    const previous = await readLastJournal(file);
+    this.revisions.set(file, previous.revision);
+    if (previous.afterFingerprint !== undefined) {
+      this.afterFingerprints.set(file, previous.afterFingerprint);
+    }
+    return previous;
   }
 
   private async acquireLock(key: string): Promise<() => void> {
@@ -87,13 +137,27 @@ export class LocalMutationCoordinator {
 }
 
 async function readLastRevision(file: string): Promise<number> {
+  return (await readLastJournal(file)).revision;
+}
+
+async function readLastJournal(
+  file: string,
+): Promise<{ revision: number; afterFingerprint?: string }> {
   try {
     const lines = (await readFile(file, "utf8")).split("\n").filter(Boolean);
-    if (lines.length === 0) return 0;
-    const last = JSON.parse(lines.at(-1)!) as { revision?: unknown };
-    return typeof last.revision === "number" ? last.revision : 0;
+    if (lines.length === 0) return { revision: 0 };
+    const last = JSON.parse(lines.at(-1)!) as {
+      revision?: unknown;
+      afterFingerprint?: unknown;
+    };
+    return {
+      revision: typeof last.revision === "number" ? last.revision : 0,
+      ...(typeof last.afterFingerprint === "string"
+        ? { afterFingerprint: last.afterFingerprint }
+        : {}),
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { revision: 0 };
     throw error;
   }
 }

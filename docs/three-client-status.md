@@ -22,7 +22,7 @@
 - CLI 支持 `--code`、`--clone`、`--workspace`、`--worktree`、`--resume` 和 `--legacy-workdir`。
 - `direct` 是默认行为且会真实修改原仓库；Git `worktree` 使用独立 `helios/<materializationId>` 分支。
 - 首发后 binding 锁定；Workspace Platform 的 rollback 固定为 conversation-only。
-- Write/Edit 有逐文件 EditRecord；Bash/外部进程的完整编辑归因仍是已知限制。
+- Write/Edit 有逐文件 EditRecord；direct run 通过前后 fingerprint 检测 Helios 外部修改并写入 audit gap。Workspace Runtime 当前禁用 Bash，待补齐 Sandbox confinement 与外部进程审计后再开放。
 
 ### 浏览器安全入口（node/browser 传输隔离）
 

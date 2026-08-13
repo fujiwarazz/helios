@@ -76,10 +76,14 @@ export async function openCliWorkspace(
       }
       bound = await registry.resumeSession(options.cli.resume, {
         askQuestion: options.askQuestion,
+        materialize: { signal: options.signal, timeoutMs: options.gitTimeoutMs },
       });
     } else {
       const launch = await createLaunchRequest(options, repositories, catalog);
-      bound = await registry.createSession(launch, { askQuestion: options.askQuestion });
+      bound = await registry.createSession(launch, {
+        askQuestion: options.askQuestion,
+        materialize: { signal: options.signal, timeoutMs: options.gitTimeoutMs },
+      });
     }
 
     let closed = false;

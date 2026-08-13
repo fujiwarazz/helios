@@ -120,5 +120,6 @@ export interface MutationJournalRecord {
   runId: string;
   beforeFingerprint: string;
   afterFingerprint: string;
+  externalModification?: boolean;
   createdAt: number;
 }

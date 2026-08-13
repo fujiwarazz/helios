@@ -112,6 +112,10 @@ describe("LocalRepositoryService", () => {
       args: ["clone", "--", remoteUrl, expect.stringContaining(".tmp-")],
       options: { signal, timeoutMs: 1234 },
     });
+    expect(git.calls.slice(1).map((call) => call.options)).toEqual([
+      { cwd: expect.stringContaining(".tmp-"), signal, timeoutMs: 1234 },
+      { cwd: expect.stringContaining(".tmp-"), signal, timeoutMs: 1234 },
+    ]);
     expect(cloned.roots[0]?.source).toEqual({
       type: "git",
       remoteIdentity,
@@ -176,6 +180,67 @@ describe("LocalRepositoryService", () => {
     await expect(readFile(paths.repositorySource("repo_fixed"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("does not promote or catalog a clone cancelled during inspection", async () => {
+    const abort = new AbortController();
+    const git: GitRunner = {
+      run: vi.fn(async (args, options) => {
+        if (args[0] === "clone") {
+          await mkdir(args.at(-1)!, { recursive: true });
+          return { stdout: "", stderr: "" };
+        }
+        if (args.includes("--show-toplevel")) {
+          abort.abort();
+          return { stdout: options?.cwd ?? "", stderr: "" };
+        }
+        return { stdout: "main", stderr: "" };
+      }),
+    };
+    const service = new LocalRepositoryService({
+      catalog,
+      paths,
+      allowedRoots: [],
+      git,
+      idFactory: fixedIds(),
+    });
+
+    await expect(
+      service.cloneRepository("https://github.com/org/repo.git", { signal: abort.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    await expect(catalog.list()).resolves.toEqual([]);
+    await expect(readFile(paths.repositorySource("repo_fixed"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("accepts a detached cloned repository when symbolic-ref exits normally with no branch", async () => {
+    const git: GitRunner = {
+      run: vi.fn(async (args, options) => {
+        if (args[0] === "clone") {
+          await mkdir(args.at(-1)!, { recursive: true });
+          return { stdout: "", stderr: "" };
+        }
+        if (args.includes("--show-toplevel")) {
+          return { stdout: options?.cwd ?? "", stderr: "" };
+        }
+        if (args[0] === "symbolic-ref") {
+          throw Object.assign(new Error("detached HEAD"), { timedOut: false, exitCode: 1 });
+        }
+        throw new Error(`unexpected git call: ${args.join(" ")}`);
+      }),
+    };
+    const service = new LocalRepositoryService({
+      catalog,
+      paths,
+      allowedRoots: [],
+      git,
+      idFactory: fixedIds(),
+    });
+
+    const workspace = await service.cloneRepository("https://github.com/org/repo.git");
+
+    expect(workspace.roots[0]?.git).toEqual({ defaultBranch: undefined });
   });
 });
 

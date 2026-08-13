@@ -10,9 +10,9 @@ import {
 } from "@helios/kernel";
 import type { Logger } from "@helios/ports";
 import type { WorkspaceCatalog } from "./catalog";
-import type { WorkspaceMaterializer } from "./materializer";
+import type { MaterializeOptions, WorkspaceMaterializer } from "./materializer";
 import { WorkspacePaths } from "./paths";
-import { ExecaGitRunner, type GitRunner } from "./repositoryService";
+import { DEFAULT_GIT_TIMEOUT_MS, ExecaGitRunner, type GitRunner } from "./repositoryService";
 import type { SessionCatalog } from "./sessionCatalog";
 import type { LocalEditRecordStore } from "./editRecordStore";
 import type { LocalMutationCoordinator } from "./mutationCoordinator";
@@ -34,11 +34,15 @@ export interface BoundSession {
 export interface RuntimeRegistry {
   createSession(
     request: SessionLaunchRequest,
-    options: CreateSessionOptions,
+    options: RuntimeSessionOptions,
   ): Promise<BoundSession>;
-  resumeSession(sessionId: string, options: CreateSessionOptions): Promise<BoundSession>;
+  resumeSession(sessionId: string, options: RuntimeSessionOptions): Promise<BoundSession>;
   release(runtimeId: string, sessionId?: string): Promise<void>;
   scavengeExpiredDrafts(now?: number): Promise<number>;
+}
+
+export interface RuntimeSessionOptions extends CreateSessionOptions {
+  materialize?: MaterializeOptions;
 }
 
 export interface LocalRuntimeRegistryOptions {
@@ -119,19 +123,45 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
 
   async createSession(
     request: SessionLaunchRequest,
-    options: CreateSessionOptions,
+    options: RuntimeSessionOptions,
   ): Promise<BoundSession> {
+    const { materialize: materializeOptions, ...sessionOptions } = options;
     const sessionId = this.idFactory("sess");
     const workspace = await this.resolveLaunchWorkspace(request);
     const binding = this.createBinding(sessionId, request, workspace);
-    const materialized = await this.materializeOrUnavailable(workspace, binding);
-    const runtime = await this.acquireRuntime(workspace, binding, materialized);
+    const materialized = await this.materializeOrUnavailable(
+      workspace,
+      binding,
+      materializeOptions,
+    );
+    let runtime: RuntimeEntry;
+    try {
+      runtime = await this.acquireRuntime(workspace, binding, materialized);
+    } catch (error) {
+      try {
+        await this.removeDraftFiles({
+          sessionId,
+          runtimeId: "",
+          workspace,
+          binding,
+          materialized,
+          expiresAt: this.now(),
+        });
+        if (workspace.kind === "managed-chat") await this.catalog.delete(workspace.id);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `runtime startup failed and workspace cleanup was incomplete: ${workspace.id}`,
+        );
+      }
+      throw error;
+    }
     binding.runtimeId = runtime.id;
     const createdAt = this.now();
     const persistedBinding = withoutRuntimeId(binding);
 
     const session = runtime.kernel.createSession({
-      ...options,
+      ...sessionOptions,
       id: sessionId,
       beforeFirstRun: async (text) => {
         const record: SessionRecord = {
@@ -149,11 +179,11 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
         };
         await this.sessions.create(record);
         this.drafts.delete(sessionId);
-        await options.beforeFirstRun?.(text);
+        await sessionOptions.beforeFirstRun?.(text);
       },
       onRunStateChange: async (state) => {
         await this.sessions.updateState(sessionId, state);
-        await options.onRunStateChange?.(state);
+        await sessionOptions.onRunStateChange?.(state);
       },
       ...this.auditOptions(sessionId, workspace, binding, materialized),
     });
@@ -170,8 +200,9 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
 
   async resumeSession(
     sessionId: string,
-    options: CreateSessionOptions,
+    options: RuntimeSessionOptions,
   ): Promise<BoundSession> {
+    const { materialize: materializeOptions, ...sessionOptions } = options;
     const record = await this.sessions.get(sessionId);
     if (!record) throw new WorkspaceUnavailableError(`session ${sessionId} does not exist`);
     const workspace = await this.catalog.get(record.binding.workspaceId);
@@ -181,16 +212,20 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       );
     }
     const binding = withoutRuntimeId(record.binding);
-    const materialized = await this.materializeOrUnavailable(workspace, binding);
+    const materialized = await this.materializeOrUnavailable(
+      workspace,
+      binding,
+      materializeOptions,
+    );
     const runtime = await this.acquireRuntime(workspace, binding, materialized);
     binding.runtimeId = runtime.id;
     try {
       const session = await runtime.kernel.resumeSession(sessionId, {
-        ...options,
+        ...sessionOptions,
         id: sessionId,
         onRunStateChange: async (state) => {
           await this.sessions.updateState(sessionId, state);
-          await options.onRunStateChange?.(state);
+          await sessionOptions.onRunStateChange?.(state);
         },
         ...this.auditOptions(sessionId, workspace, binding, materialized),
       });
@@ -273,15 +308,35 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
   private async materializeOrUnavailable(
     workspace: Workspace,
     binding: SessionWorkspaceBinding,
+    options?: MaterializeOptions,
   ): Promise<MaterializedWorkspace> {
     try {
-      return await this.materializer.materialize(workspace, binding);
+      await this.pinWorktreeRevision(workspace, binding, options);
+      return await this.materializer.materialize(workspace, binding, options);
     } catch (error) {
       throw new WorkspaceUnavailableError(
         `workspace ${workspace.id} cannot be materialized: ${error instanceof Error ? error.message : String(error)}`,
         { cause: error },
       );
     }
+  }
+
+  private async pinWorktreeRevision(
+    workspace: Workspace,
+    binding: SessionWorkspaceBinding,
+    options?: MaterializeOptions,
+  ): Promise<void> {
+    const rootBinding = binding.roots[0];
+    if (!rootBinding || rootBinding.strategy !== "worktree" || rootBinding.revision) return;
+    const root = workspace.roots.find((candidate) => candidate.id === rootBinding.rootId);
+    if (!root?.git) throw new Error("worktree materialization requires a Git root");
+    const reference = rootBinding.branch ?? root.git.defaultBranch ?? "HEAD";
+    const result = await this.git.run(["rev-parse", reference], {
+      cwd: sourcePath(this.paths, workspace, root),
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+    });
+    rootBinding.revision = result.stdout.trim();
   }
 
   private async acquireRuntime(
@@ -408,6 +463,12 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
                 rootPath: root.absolutePath,
                 sessionId,
                 runId,
+                onExternalModification: async () => {
+                  await this.sessions.appendAuditGap(sessionId, {
+                    reason: "workspace changed outside Helios before this run",
+                    createdAt: this.now(),
+                  });
+                },
               })
           : undefined,
     };
@@ -422,17 +483,36 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       const workspaceRoot = draft.workspace.roots.find((root) => root.id === rootBinding.rootId);
       if (!materializedRoot || !workspaceRoot) continue;
       const source = sourcePath(this.paths, draft.workspace, workspaceRoot);
-      try {
-        await this.git.run(["worktree", "remove", "--force", materializedRoot.absolutePath], {
-          cwd: source,
-        });
-      } catch {
-        await rm(materializedRoot.absolutePath, { recursive: true, force: true });
-      }
+      const gitOptions = { cwd: source, timeoutMs: DEFAULT_GIT_TIMEOUT_MS };
+      const cleanupErrors: unknown[] = [];
       await this.git
-        .run(["branch", "-D", `helios/${rootBinding.materializationId}`], { cwd: source })
-        .catch(() => undefined);
+        .run(["worktree", "remove", "--force", materializedRoot.absolutePath], gitOptions)
+        .catch((error) => cleanupErrors.push(error));
+      await rm(materializedRoot.absolutePath, { recursive: true, force: true });
+      const branch = `helios/${rootBinding.materializationId}`;
+      await this.git
+        .run(["branch", "-D", branch], gitOptions)
+        .catch((error) => cleanupErrors.push(error));
+      await this.git
+        .run(["worktree", "prune"], gitOptions)
+        .catch((error) => cleanupErrors.push(error));
+      let verificationError: unknown;
+      try {
+        const [worktrees, branches] = await Promise.all([
+          this.git.run(["worktree", "list", "--porcelain"], gitOptions),
+          this.git.run(["branch", "--list", branch], gitOptions),
+        ]);
+        if (worktrees.stdout.includes(materializedRoot.absolutePath) || branches.stdout.trim()) {
+          throw new Error(`worktree cleanup left Git metadata for ${materializedRoot.absolutePath}`);
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+        verificationError = error;
+      }
       await rm(dirname(materializedRoot.absolutePath), { recursive: true, force: true });
+      if (verificationError !== undefined) {
+        throw new AggregateError(cleanupErrors, `failed to fully clean worktree ${branch}`);
+      }
     }
     if (draft.workspace.kind === "managed-chat") {
       await rm(this.paths.managedRoot(draft.workspace.id), { recursive: true, force: true });

@@ -109,6 +109,40 @@ describe("LocalWorkspaceMaterializer", () => {
     expect(git.worktreeAddCalls).toBe(1);
   });
 
+  it("passes cancellation and timeout to Git worktree operations", async () => {
+    const source = await createRepository(join(dataRoot, "source"));
+    const target = gitWorkspace(source);
+    const git = new CountingGitRunner();
+    const materializer = new LocalWorkspaceMaterializer({ paths, git });
+    const signal = new AbortController().signal;
+
+    await materializer.materialize(target, binding(target, "worktree"), {
+      signal,
+      timeoutMs: 1_234,
+    });
+
+    expect(git.worktreeAddOptions).toMatchObject({ signal, timeoutMs: 1_234 });
+  });
+
+  it("reports incomplete Git cleanup without hiding the materialization failure", async () => {
+    const source = await createRepository(join(dataRoot, "cleanup-source"));
+    const target = gitWorkspace(source);
+    const materializer = new LocalWorkspaceMaterializer({
+      paths,
+      git: new FailingCleanupGitRunner(),
+    });
+
+    await expect(
+      materializer.materialize(target, binding(target, "worktree")),
+    ).rejects.toMatchObject({
+      name: "AggregateError",
+      message: expect.stringMatching(/cleanup.*incomplete/i),
+      errors: expect.arrayContaining([
+        expect.objectContaining({ message: "simulated materialization failure" }),
+      ]),
+    });
+  });
+
   it("isolates different materialization ids and branches", async () => {
     const source = await createRepository(join(dataRoot, "source"));
     await runGit(["branch", "feature"], source);
@@ -172,9 +206,34 @@ describe("LocalWorkspaceMaterializer", () => {
 class CountingGitRunner implements GitRunner {
   private readonly delegate = new ExecaGitRunner();
   worktreeAddCalls = 0;
+  worktreeAddOptions: GitRunOptions | undefined;
 
   run(args: string[], options?: GitRunOptions): Promise<{ stdout: string; stderr: string }> {
-    if (args[0] === "worktree" && args[1] === "add") this.worktreeAddCalls += 1;
+    if (args[0] === "worktree" && args[1] === "add") {
+      this.worktreeAddCalls += 1;
+      this.worktreeAddOptions = options;
+    }
+    return this.delegate.run(args, options);
+  }
+}
+
+class FailingCleanupGitRunner implements GitRunner {
+  private readonly delegate = new ExecaGitRunner();
+
+  async run(
+    args: string[],
+    options?: GitRunOptions,
+  ): Promise<{ stdout: string; stderr: string }> {
+    if (args[0] === "worktree" && args[1] === "add") {
+      await this.delegate.run(args, options);
+      throw new Error("simulated materialization failure");
+    }
+    if (
+      (args[0] === "worktree" && ["remove", "prune"].includes(args[1] ?? "")) ||
+      (args[0] === "branch" && args[1] === "-D")
+    ) {
+      return { stdout: "", stderr: "" };
+    }
     return this.delegate.run(args, options);
   }
 }

@@ -6,7 +6,7 @@ import type { WorkspaceCatalog } from "./catalog";
 import { WorkspacePaths } from "./paths";
 import type { Workspace } from "./types";
 
-const DEFAULT_GIT_TIMEOUT_MS = 120_000;
+export const DEFAULT_GIT_TIMEOUT_MS = 120_000;
 
 export interface GitRunOptions {
   cwd?: string;
@@ -24,7 +24,10 @@ export interface RepositoryService {
     remoteUrl: string,
     options?: { name?: string; signal?: AbortSignal; timeoutMs?: number },
   ): Promise<Workspace>;
-  inspectGit(path: string): Promise<{ repoRoot: string; defaultBranch?: string } | undefined>;
+  inspectGit(
+    path: string,
+    options?: GitRunOptions,
+  ): Promise<{ repoRoot: string; defaultBranch?: string } | undefined>;
 }
 
 export interface LocalRepositoryServiceOptions {
@@ -110,15 +113,18 @@ export class LocalRepositoryService implements RepositoryService {
     const destination = this.paths.repositorySource(repositoryId);
     const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
     let promoted = false;
+    const gitOptions: GitRunOptions = {
+      signal: options.signal,
+      timeoutMs: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+    };
 
     await mkdir(dirname(destination), { recursive: true });
     try {
-      await this.git.run(["clone", "--", remoteUrl, temporary], {
-        signal: options.signal,
-        timeoutMs: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
-      });
-      const git = await this.inspectGit(temporary);
+      await this.git.run(["clone", "--", remoteUrl, temporary], gitOptions);
+      options.signal?.throwIfAborted();
+      const git = await this.inspectGit(temporary, gitOptions);
       if (!git) throw new Error("cloned repository is not a Git work tree");
+      options.signal?.throwIfAborted();
 
       await rename(temporary, destination);
       promoted = true;
@@ -140,33 +146,47 @@ export class LocalRepositoryService implements RepositoryService {
         createdAt: timestamp,
         updatedAt: timestamp,
       };
+      options.signal?.throwIfAborted();
       await this.catalog.put(workspace);
+      options.signal?.throwIfAborted();
       return workspace;
     } catch (error) {
       await rm(temporary, { recursive: true, force: true });
       if (promoted) await rm(destination, { recursive: true, force: true });
+      await this.catalog.delete(workspaceId).catch(() => undefined);
       throw error;
     }
   }
 
   async inspectGit(
     path: string,
+    options: GitRunOptions = {},
   ): Promise<{ repoRoot: string; defaultBranch?: string } | undefined> {
     let repoRoot: string;
     try {
-      const result = await this.git.run(["rev-parse", "--show-toplevel"], { cwd: path });
+      const result = await this.git.run(["rev-parse", "--show-toplevel"], {
+        ...options,
+        cwd: path,
+      });
+      options.signal?.throwIfAborted();
       repoRoot = await realpath(result.stdout.trim());
-    } catch {
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (options.timeoutMs !== undefined && isTimeoutError(error)) throw error;
       return undefined;
     }
 
     let defaultBranch: string | undefined;
     try {
       const result = await this.git.run(["symbolic-ref", "--quiet", "--short", "HEAD"], {
+        ...options,
         cwd: repoRoot,
       });
+      options.signal?.throwIfAborted();
       defaultBranch = result.stdout.trim() || undefined;
-    } catch {
+    } catch (error) {
+      options.signal?.throwIfAborted();
+      if (options.timeoutMs !== undefined && isTimeoutError(error)) throw error;
       defaultBranch = undefined;
     }
     return { repoRoot, defaultBranch };
@@ -178,6 +198,15 @@ export class LocalRepositoryService implements RepositoryService {
       throw new Error(`path is outside allowed roots: ${candidate}`);
     }
   }
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      (("timedOut" in error && (error as { timedOut?: unknown }).timedOut === true) ||
+        ("code" in error && (error as { code?: unknown }).code === "ETIMEDOUT")),
+  );
 }
 
 function isWithin(root: string, candidate: string): boolean {

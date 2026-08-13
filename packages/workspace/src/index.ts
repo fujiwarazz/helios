@@ -7,6 +7,7 @@ export {
   type WorkspaceCatalog,
 } from "./catalog";
 export {
+  DEFAULT_GIT_TIMEOUT_MS,
   ExecaGitRunner,
   LocalRepositoryService,
   type GitRunner,
@@ -16,6 +17,7 @@ export {
 } from "./repositoryService";
 export {
   LocalWorkspaceMaterializer,
+  type MaterializeOptions,
   type LocalWorkspaceMaterializerOptions,
   type WorkspaceMaterializer,
 } from "./materializer";
@@ -39,10 +41,15 @@ export {
   type BoundSession,
   type LocalRuntimeRegistryOptions,
   type RuntimeRegistry,
+  type RuntimeSessionOptions,
 } from "./runtimeRegistry";
 export { LocalEditRecordStore, type LocalEditRecordStoreOptions } from "./editRecordStore";
 export { fingerprintWorkspace } from "./workspaceFingerprint";
-export { LocalMutationCoordinator, type MutationRunContext } from "./mutationCoordinator";
+export {
+  LocalMutationCoordinator,
+  type ExternalModificationWarning,
+  type MutationRunContext,
+} from "./mutationCoordinator";
 export type {
   CloneWorkspaceRequest,
   EditRecord,

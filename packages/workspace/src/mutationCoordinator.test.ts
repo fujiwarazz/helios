@@ -48,6 +48,35 @@ describe("LocalMutationCoordinator", () => {
     expect(rows[0].beforeFingerprint).not.toBe(rows[0].afterFingerprint);
   });
 
+  it("warns when files changed outside Helios between direct runs", async () => {
+    const warnings: Array<{ expectedFingerprint: string; actualFingerprint: string }> = [];
+    await coordinator.run(context("sess_1", "run_1"), async () => {
+      await writeFile(join(root, "tracked.txt"), "helios");
+    });
+    await writeFile(join(root, "tracked.txt"), "external");
+
+    await coordinator.run(
+      {
+        ...context("sess_2", "run_2"),
+        onExternalModification: async (warning) => {
+          warnings.push(warning);
+        },
+      },
+      async () => undefined,
+    );
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.expectedFingerprint).not.toBe(warnings[0]?.actualFingerprint);
+    const rows = (await readFile(
+      new WorkspacePaths(dataRoot).mutationLog("ws_1", "direct-root_1"),
+      "utf8",
+    ))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(rows[1]).toMatchObject({ externalModification: true });
+  });
+
   function context(sessionId: string, runId: string) {
     return {
       workspaceId: "ws_1",

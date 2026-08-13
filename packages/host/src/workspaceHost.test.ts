@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger } from "@helios/ports";
 import { RpcClient, nodeWsClientTransport } from "@helios/protocol";
+import { WebSocket } from "ws";
 import {
   LocalRepositoryService,
   LocalRuntimeRegistry,
@@ -12,6 +13,7 @@ import {
   LocalWorkspaceMaterializer,
   WorkspacePaths,
   type SessionWorkspaceBinding,
+  type RuntimeRegistry,
   type WorkspaceSummary,
 } from "@helios/workspace";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -71,6 +73,7 @@ describe("serveWorkspaceHostOverWs", () => {
     const local = join(allowedRoot, "repo");
     await mkdir(local);
     const workspace = await repositories.importLocalDirectory(local, "Local repo");
+    await catalog.createManagedChat("Hidden Chat workspace");
     const launch = {
       mode: "code",
       workspaceId: workspace.id,
@@ -119,6 +122,57 @@ describe("serveWorkspaceHostOverWs", () => {
       expect.stringMatching(/^runtime_/),
       expect.stringMatching(/^sess_/),
     );
+  });
+
+  it("cancels pending materialization when the client disconnects", async () => {
+    await handle.close();
+    let signal: AbortSignal | undefined;
+    const pendingRegistry = {
+      createSession: (_request, options) => {
+        signal = options.materialize?.signal;
+        return new Promise(() => undefined);
+      },
+      resumeSession: () => new Promise(() => undefined),
+      release: async () => undefined,
+      scavengeExpiredDrafts: async () => 0,
+    } satisfies RuntimeRegistry;
+    handle = await serveWorkspaceHostOverWs({
+      registry: pendingRegistry,
+      catalog,
+      sessions,
+      repositories,
+      port: 0,
+    });
+    const socket = new WebSocket(`ws://127.0.0.1:${handle.port}`);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve);
+      socket.once("error", reject);
+    });
+
+    socket.close();
+    await new Promise<void>((resolve) => socket.once("close", resolve));
+    await waitFor(() => signal?.aborted === true, 2_000);
+
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("cancels a pending Clone when the client disconnects", async () => {
+    let signal: AbortSignal | undefined;
+    vi.spyOn(repositories, "cloneRepository").mockImplementation((_remoteUrl, options) => {
+      signal = options?.signal;
+      return new Promise(() => undefined);
+    });
+    const rpc = connect({ launch: { mode: "chat" } });
+    await rpc.call("sessionId");
+    void rpc
+      .call("workspaces.clone", { remoteUrl: "git@host:org/repo.git" })
+      .catch(() => undefined);
+    await waitFor(() => signal !== undefined, 2_000);
+
+    rpc.close();
+    await waitFor(() => signal?.aborted === true, 2_000);
+
+    expect(signal?.aborted).toBe(true);
   });
 
   it("advertises capabilities and disables workspace mutations with Code mode", async () => {

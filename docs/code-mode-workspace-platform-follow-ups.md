@@ -29,6 +29,7 @@
 
 ### 4. Bash 与外部进程的完整编辑审计
 
+- 首期 Workspace Runtime 为避免 cwd 逃逸而禁用 Bash；本项完成安全边界后再重新开放。
 - 用 Sandbox overlay、文件系统 journal 或 pre/post tree diff 覆盖 Bash、格式化器和 LSP 写入。
 - 将变更尽量归因到 toolUseId；无法精确归因时至少绑定 turnId。
 - EditRecord 大文件改用 blob/hash，避免在 JSONL 重复保存完整 before/after。

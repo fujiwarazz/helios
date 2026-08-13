@@ -1,7 +1,12 @@
 import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { WorkspacePaths } from "./paths";
-import { ExecaGitRunner, type GitRunner } from "./repositoryService";
+import {
+  DEFAULT_GIT_TIMEOUT_MS,
+  ExecaGitRunner,
+  type GitRunOptions,
+  type GitRunner,
+} from "./repositoryService";
 import type {
   MaterializedWorkspace,
   SessionWorkspaceBinding,
@@ -13,7 +18,13 @@ export interface WorkspaceMaterializer {
   materialize(
     workspace: Workspace,
     binding: SessionWorkspaceBinding,
+    options?: MaterializeOptions,
   ): Promise<MaterializedWorkspace>;
+}
+
+export interface MaterializeOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface LocalWorkspaceMaterializerOptions {
@@ -43,6 +54,7 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
   async materialize(
     workspace: Workspace,
     binding: SessionWorkspaceBinding,
+    options: MaterializeOptions = {},
   ): Promise<MaterializedWorkspace> {
     if (workspace.roots.length !== 1 || binding.roots.length !== 1) {
       throw new Error("single-root workspace required during the single-repository MVP");
@@ -58,7 +70,7 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     const absolutePath =
       rootBinding.strategy === "direct"
         ? await realpath(this.sourcePath(workspace, root))
-        : await this.materializeWorktree(workspace, root, rootBinding);
+        : await this.materializeWorktree(workspace, root, rootBinding, options);
 
     return {
       workspaceId: workspace.id,
@@ -83,12 +95,18 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     workspace: Workspace,
     root: WorkspaceRoot,
     rootBinding: SessionWorkspaceBinding["roots"][number],
+    options: MaterializeOptions,
   ): Promise<string> {
     if (!root.git) throw new Error("worktree materialization requires a Git root");
 
     const source = await realpath(this.sourcePath(workspace, root));
     const target = this.paths.worktreeRoot(workspace.id, rootBinding.materializationId, root.id);
     const lockKey = resolve(target);
+    const gitOptions: GitRunOptions = {
+      signal: options.signal,
+      timeoutMs: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
+    };
+    const cleanupOptions: GitRunOptions = { timeoutMs: DEFAULT_GIT_TIMEOUT_MS };
     return withWorktreeLock(lockKey, async () => {
       const requestedBranch = rootBinding.branch ?? root.git?.defaultBranch;
       const reference = requestedBranch ?? "HEAD";
@@ -103,10 +121,17 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
           reference,
           workingBranch,
           revision: rootBinding.revision,
+          gitOptions,
         });
       } else {
         await mkdir(dirname(target), { recursive: true });
-        let created = false;
+        const existingBranch = await this.git.run(["branch", "--list", workingBranch], {
+          ...gitOptions,
+          cwd: source,
+        });
+        if (existingBranch.stdout.trim()) {
+          throw new Error(`worktree branch already exists: ${workingBranch}`);
+        }
         try {
           await this.git.run(
             [
@@ -117,9 +142,8 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
               target,
               rootBinding.revision ?? reference,
             ],
-            { cwd: source },
+            { ...gitOptions, cwd: source },
           );
-          created = true;
           const metadata: WorktreeMetadata = {
             schemaVersion: 1,
             materializationId: rootBinding.materializationId,
@@ -129,16 +153,20 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
           };
           await writeFile(metadataFile, `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
         } catch (error) {
-          if (created) {
-            await this.git
-              .run(["worktree", "remove", "--force", target], { cwd: source })
-              .catch(() => undefined);
-            await this.git
-              .run(["branch", "-D", workingBranch], { cwd: source })
-              .catch(() => undefined);
+          try {
+            await this.cleanupFailedWorktree({
+              source,
+              target,
+              metadataFile,
+              workingBranch,
+              cleanupOptions,
+            });
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              `worktree materialization failed and cleanup was incomplete: ${target}`,
+            );
           }
-          await rm(target, { recursive: true, force: true });
-          await rm(metadataFile, { force: true });
           throw error;
         }
       }
@@ -154,8 +182,10 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     reference: string;
     workingBranch: string;
     revision?: string;
+    gitOptions: GitRunOptions;
   }): Promise<void> {
     const listing = await this.git.run(["worktree", "list", "--porcelain"], {
+      ...options.gitOptions,
       cwd: options.source,
     });
     const canonicalTarget = await realpath(options.target);
@@ -172,8 +202,8 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     if (!listed) throw new Error("existing worktree path is not registered with the repository");
 
     const [sourceCommonDir, targetCommonDir] = await Promise.all([
-      this.gitCommonDir(options.source),
-      this.gitCommonDir(options.target),
+      this.gitCommonDir(options.source, options.gitOptions),
+      this.gitCommonDir(options.target, options.gitOptions),
     ]);
     if (sourceCommonDir !== targetCommonDir) {
       throw new Error("existing worktree belongs to a different repository");
@@ -193,6 +223,7 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     try {
       branch = (
         await this.git.run(["symbolic-ref", "--quiet", "--short", "HEAD"], {
+          ...options.gitOptions,
           cwd: options.target,
         })
       ).stdout.trim();
@@ -207,7 +238,10 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
 
     if (options.revision) {
       const head = (
-        await this.git.run(["rev-parse", "HEAD"], { cwd: options.target })
+        await this.git.run(["rev-parse", "HEAD"], {
+          ...options.gitOptions,
+          cwd: options.target,
+        })
       ).stdout.trim();
       if (head !== options.revision) {
         throw new Error("existing worktree HEAD does not match requested revision");
@@ -215,9 +249,54 @@ export class LocalWorkspaceMaterializer implements WorkspaceMaterializer {
     }
   }
 
-  private async gitCommonDir(cwd: string): Promise<string> {
-    const output = (await this.git.run(["rev-parse", "--git-common-dir"], { cwd })).stdout.trim();
+  private async gitCommonDir(cwd: string, gitOptions: GitRunOptions): Promise<string> {
+    const output = (
+      await this.git.run(["rev-parse", "--git-common-dir"], { ...gitOptions, cwd })
+    ).stdout.trim();
     return await realpath(isAbsolute(output) ? output : resolve(cwd, output));
+  }
+
+  private async cleanupFailedWorktree(options: {
+    source: string;
+    target: string;
+    metadataFile: string;
+    workingBranch: string;
+    cleanupOptions: GitRunOptions;
+  }): Promise<void> {
+    const gitOptions = { ...options.cleanupOptions, cwd: options.source };
+    const cleanupErrors: unknown[] = [];
+    await this.git
+      .run(["worktree", "remove", "--force", options.target], gitOptions)
+      .catch((error) => cleanupErrors.push(error));
+    await rm(options.target, { recursive: true, force: true }).catch((error) =>
+      cleanupErrors.push(error),
+    );
+    await rm(options.metadataFile, { force: true }).catch((error) => cleanupErrors.push(error));
+    await this.git
+      .run(["branch", "-D", options.workingBranch], gitOptions)
+      .catch((error) => cleanupErrors.push(error));
+    await this.git
+      .run(["worktree", "prune"], gitOptions)
+      .catch((error) => cleanupErrors.push(error));
+
+    try {
+      const [worktrees, branches] = await Promise.all([
+        this.git.run(["worktree", "list", "--porcelain"], gitOptions),
+        this.git.run(["branch", "--list", options.workingBranch], gitOptions),
+      ]);
+      const target = resolve(options.target);
+      const targetRegistered = parseWorktreePaths(worktrees.stdout).some(
+        (path) => resolve(path) === target,
+      );
+      const filesystemRemains =
+        (await pathExists(options.target)) || (await pathExists(options.metadataFile));
+      if (targetRegistered || branches.stdout.trim() || filesystemRemains) {
+        throw new Error(`cleanup state remains for failed worktree ${options.target}`);
+      }
+    } catch (error) {
+      cleanupErrors.push(error);
+      throw new AggregateError(cleanupErrors, `failed to clean worktree ${options.target}`);
+    }
   }
 }
 

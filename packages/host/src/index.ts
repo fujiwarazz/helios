@@ -353,6 +353,7 @@ export function serveWorkspaceHostOverWs(
 ): Promise<ServeHandle> {
   const wss = new WebSocketServer({ port: opts.port, host: opts.host });
   const bindings = new Set<{ dispose(): void }>();
+  const pendingMaterializations = new Set<AbortController>();
 
   wss.on("connection", (conn: NodeWebSocket, req: IncomingMessage) => {
     const approvals = createApprovals();
@@ -371,14 +372,21 @@ export function serveWorkspaceHostOverWs(
       conn.close(1008, error instanceof Error ? error.message : "invalid launch request");
       return;
     }
+    const materializeAbort = new AbortController();
+    pendingMaterializations.add(materializeAbort);
+    const sessionOptions = {
+      askQuestion,
+      materialize: { signal: materializeAbort.signal },
+    };
     const boundPromise = request.resumeSessionId
-      ? opts.registry.resumeSession(request.resumeSessionId, { askQuestion })
-      : opts.registry.createSession(request.launch ?? { mode: "chat" }, { askQuestion });
+      ? opts.registry.resumeSession(request.resumeSessionId, sessionOptions)
+      : opts.registry.createSession(request.launch ?? { mode: "chat" }, sessionOptions);
 
     let disposed = false;
     let binding: { dispose(): void } | undefined;
     conn.on("close", () => {
       disposed = true;
+      materializeAbort.abort();
       if (binding) {
         binding.dispose();
         bindings.delete(binding);
@@ -387,6 +395,7 @@ export function serveWorkspaceHostOverWs(
 
     void boundPromise
       .then((bound) => {
+        pendingMaterializations.delete(materializeAbort);
         if (disposed) {
           void bound.session.dispose().then(() =>
             opts.registry.release(bound.binding.runtimeId!, bound.session.id),
@@ -400,6 +409,7 @@ export function serveWorkspaceHostOverWs(
         for (const data of early) conn.emit("message", data);
       })
       .catch((error) => {
+        pendingMaterializations.delete(materializeAbort);
         conn.close(1011, error instanceof Error ? error.message : "workspace session init failed");
       });
   });
@@ -413,6 +423,8 @@ export function serveWorkspaceHostOverWs(
         port,
         close: () =>
           new Promise<void>((done) => {
+            for (const abort of pendingMaterializations) abort.abort();
+            pendingMaterializations.clear();
             for (const binding of bindings) binding.dispose();
             bindings.clear();
             wss.close(() => done());
@@ -438,25 +450,71 @@ export function serveWorkspaceHostOverElectronIpc(
   opts: ServeWorkspaceHostElectronOptions,
 ): ElectronIpcServeHandle {
   const bindings = new Map<string, { dispose(): void }>();
+  const pendingMaterializations = new Map<
+    string,
+    { abort: AbortController; closeSub: Disposable }
+  >();
   const connectSub = opts.onConnect(async (request) => {
     assertExclusiveWorkspaceRequest(request);
     assertCodeModeRequest(request, opts.codeMode ?? true);
     const approvals = createApprovals();
     const askQuestion = opts.askQuestion ?? approvals.askQuestion;
-    const bound = request.resumeSessionId
-      ? await opts.registry.resumeSession(request.resumeSessionId, { askQuestion })
-      : await opts.registry.createSession(request.launch ?? { mode: "chat" }, { askQuestion });
     const transport = electronMainTransport(opts.bridge, request.connectionId);
-    const binding = bindWorkspaceSession(bound, transport, approvals, opts);
-    bindings.set(request.connectionId, binding);
-    transport.onClose(() => {
-      binding.dispose();
-      bindings.delete(request.connectionId);
+    const materializeAbort = new AbortController();
+    let connectionClosed = false;
+    let lifecycleBinding: { dispose(): void } | undefined;
+    const closeSub = transport.onClose(() => {
+      connectionClosed = true;
+      materializeAbort.abort();
+      lifecycleBinding?.dispose();
     });
+    pendingMaterializations.set(request.connectionId, {
+      abort: materializeAbort,
+      closeSub,
+    });
+    const sessionOptions = {
+      askQuestion,
+      materialize: { signal: materializeAbort.signal },
+    };
+    let bound: BoundSession;
+    try {
+      bound = request.resumeSessionId
+        ? await opts.registry.resumeSession(request.resumeSessionId, sessionOptions)
+        : await opts.registry.createSession(request.launch ?? { mode: "chat" }, sessionOptions);
+    } catch (error) {
+      pendingMaterializations.delete(request.connectionId);
+      closeSub.dispose();
+      throw error;
+    }
+    pendingMaterializations.delete(request.connectionId);
+    if (connectionClosed || materializeAbort.signal.aborted) {
+      closeSub.dispose();
+      await bound.session.dispose();
+      await opts.registry.release(bound.binding.runtimeId!, bound.session.id);
+      return;
+    }
+    const workspaceBinding = bindWorkspaceSession(bound, transport, approvals, opts);
+    lifecycleBinding = {
+      dispose(): void {
+        closeSub.dispose();
+        workspaceBinding.dispose();
+        bindings.delete(request.connectionId);
+      },
+    };
+    bindings.set(request.connectionId, lifecycleBinding);
+    if (connectionClosed) {
+      lifecycleBinding.dispose();
+      bindings.delete(request.connectionId);
+    }
   });
   return {
     dispose(): void {
       connectSub.dispose();
+      for (const pending of pendingMaterializations.values()) {
+        pending.abort.abort();
+        pending.closeSub.dispose();
+      }
+      pendingMaterializations.clear();
       for (const binding of bindings.values()) binding.dispose();
       bindings.clear();
     },
@@ -477,6 +535,7 @@ function bindWorkspaceSession(
   },
 ): { dispose(): void } {
   let disposed = false;
+  const workspaceMutationAbort = new AbortController();
   const codeMode = services.codeMode ?? true;
   const allowLocalImport = codeMode && (services.allowLocalImport ?? true);
   const mutationHandlers: Record<string, RpcHandler> = codeMode
@@ -494,7 +553,10 @@ function bindWorkspaceSession(
         "workspaces.clone": async (params: unknown) => {
           const request = params as CloneWorkspaceRequest;
           return toWorkspaceSummary(
-            await services.repositories.cloneRepository(request.remoteUrl, { name: request.name }),
+            await services.repositories.cloneRepository(request.remoteUrl, {
+              name: request.name,
+              signal: workspaceMutationAbort.signal,
+            }),
           );
         },
       }
@@ -509,13 +571,16 @@ function bindWorkspaceSession(
     "session.workspace": () => withoutRuntimeId(bound.binding),
     "sessions.list": () => services.sessions.list(),
     "workspaces.list": async () =>
-      (await services.catalog.list()).map((workspace) => toWorkspaceSummary(workspace)),
+      (await services.catalog.list())
+        .filter((workspace) => workspace.kind !== "managed-chat")
+        .map((workspace) => toWorkspaceSummary(workspace)),
     ...mutationHandlers,
   });
   return {
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      workspaceMutationAbort.abort();
       binding.dispose();
       void bound.session.dispose().then(() =>
         services.registry.release(bound.binding.runtimeId!, bound.session.id),
