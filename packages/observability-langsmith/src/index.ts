@@ -80,18 +80,25 @@ class LangSmithTracer implements Tracer {
   ) {}
 
   startRun(input: TraceInput): TraceRun {
-    return this.createRun(input, undefined, undefined);
+    return this.createRun(input, undefined, undefined, undefined);
   }
 
-  private createRun(input: TraceInput, parentRunId: string | undefined, traceId: string | undefined): TraceRun {
+  private createRun(
+    input: TraceInput,
+    parentRunId: string | undefined,
+    traceId: string | undefined,
+    parentDottedOrder: string | undefined,
+  ): TraceRun {
     const id = randomUUID();
     const currentTraceId = traceId ?? id;
     const startTime = this.now().getTime();
+    const dottedOrder = [parentDottedOrder, dottedOrderSegment(startTime, id)].filter(Boolean).join(".");
     void ignoreFailures(
       this.client.createRun({
         id,
         trace_id: currentTraceId,
         parent_run_id: parentRunId,
+        dotted_order: dottedOrder,
         name: input.name,
         run_type: input.runType,
         project_name: this.projectName,
@@ -102,7 +109,7 @@ class LangSmithTracer implements Tracer {
     );
 
     return {
-      startChild: (child) => this.createRun(child, id, currentTraceId),
+      startChild: (child) => this.createRun(child, id, currentTraceId, dottedOrder),
       end: async (result) => {
         await ignoreFailures(
           this.client.updateRun(id, {
@@ -153,4 +160,9 @@ function truncate(value: string): string {
 
 function stringifyError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function dottedOrderSegment(startTime: number, runId: string): string {
+  const timestamp = `${new Date(startTime).toISOString().slice(0, -1)}001Z`;
+  return timestamp.replace(/[-:.]/g, "") + runId;
 }

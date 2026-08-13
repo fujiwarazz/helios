@@ -36,4 +36,23 @@ describe("createLangSmithTracer", () => {
       }),
     );
   });
+
+  it("supplies hierarchical dotted order values required by the LangSmith API", () => {
+    const createRun = vi.fn().mockResolvedValue(undefined);
+    const tracer = createLangSmithTracer(
+      {
+        LANGSMITH_TRACING: "true",
+        LANGSMITH_API_KEY: "test-key",
+        LANGSMITH_PROJECT: "helios",
+      },
+      { client: { createRun, updateRun: vi.fn().mockResolvedValue(undefined) }, now: () => new Date("2026-08-13T00:00:00.000Z") },
+    );
+
+    const root = tracer.startRun({ name: "root", runType: "chain" });
+    root.startChild({ name: "child", runType: "llm" });
+
+    const [rootPayload, childPayload] = createRun.mock.calls.map(([payload]) => payload as Record<string, string>);
+    expect(rootPayload.dotted_order).toMatch(/^20260813T000000000001Z[0-9a-f-]{36}$/);
+    expect(childPayload.dotted_order).toMatch(new RegExp(`^${rootPayload.dotted_order}\\.20260813T000000000001Z[0-9a-f-]{36}$`));
+  });
 });
