@@ -104,12 +104,19 @@ export class LegacySessionMigrator {
         join(match.directory, "compactions.jsonl"),
         join(temporary, "compactions.jsonl"),
       );
+      await writeFile(
+        join(temporary, "session.json"),
+        `${JSON.stringify(record, null, 2)}\n`,
+        "utf8",
+      );
 
       await mkdir(dirname(destination), { recursive: true });
-      await rm(destination, { recursive: true, force: true });
+      if (await exists(destination)) {
+        const existingRecord = await this.sessions.get(sessionId);
+        if (existingRecord) return existingRecord;
+        await rm(destination, { recursive: true, force: true });
+      }
       await rename(temporary, destination);
-      await this.sessions.create(record);
-      await this.sessions.updateState(sessionId, "idle");
       return await this.sessions.get(sessionId);
     } catch (error) {
       await rm(temporary, { recursive: true, force: true });

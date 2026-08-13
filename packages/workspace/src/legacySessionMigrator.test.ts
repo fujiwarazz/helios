@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalWorkspaceCatalog } from "./catalog";
 import {
   AmbiguousLegacySessionError,
@@ -82,6 +82,41 @@ describe("LegacySessionMigrator", () => {
 
     expect(second).toEqual(first);
     expect(await catalog.list()).toHaveLength(1);
+  });
+
+  it("commits session.json in the same atomic directory rename", async () => {
+    await writeLegacySession(legacyRoot, "sess_atomic");
+    const create = vi.fn(async () => {
+      throw new Error("session catalog create must not be a second commit step");
+    });
+    const migrator = new LegacySessionMigrator({
+      paths,
+      repositories: new LocalRepositoryService({
+        catalog,
+        paths,
+        allowedRoots: [legacyRoot],
+        idFactory: (prefix) => `${prefix}_atomic`,
+        now: () => 50,
+      }),
+      sessions: {
+        list: () => sessions.list(),
+        get: (id) => sessions.get(id),
+        create,
+        updateState: (id, state) => sessions.updateState(id, state),
+        appendAuditGap: (id, gap) => sessions.appendAuditGap(id, gap),
+        reconcileInterrupted: () => sessions.reconcileInterrupted(),
+      },
+      legacyRoots: [legacyRoot],
+    });
+
+    await expect(migrator.migrate("sess_atomic")).resolves.toMatchObject({
+      state: "idle",
+      binding: { sessionId: "sess_atomic" },
+    });
+    expect(create).not.toHaveBeenCalled();
+    await expect(readFile(paths.sessionRecord("sess_atomic"), "utf8")).resolves.toContain(
+      '"state": "idle"',
+    );
   });
 
   it("returns undefined when explicit roots contain no matching legacy session", async () => {
