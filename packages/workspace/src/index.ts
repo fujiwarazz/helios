@@ -1,0 +1,22 @@
+export { WorkspacePaths } from "./paths";
+export type {
+  CloneWorkspaceRequest,
+  EditRecord,
+  ImportLocalWorkspaceRequest,
+  MaterializationStrategy,
+  MaterializedWorkspace,
+  MutationJournalRecord,
+  SessionLaunchRequest,
+  SessionMode,
+  SessionRecord,
+  SessionState,
+  SessionWorkspaceBinding,
+  Workspace,
+  WorkspaceEnvelope,
+  WorkspaceKind,
+  WorkspaceRoot,
+  WorkspaceRootBinding,
+  WorkspaceRootSelection,
+  WorkspaceRootSource,
+  WorkspaceSummary,
+} from "./types";

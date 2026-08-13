@@ -55,6 +55,14 @@ export default defineConfig({
         __dirname,
         "packages/toolcache-mem/src/index.ts",
       ),
+      "@helios/workspace/types": resolve(
+        __dirname,
+        "packages/workspace/src/types.ts",
+      ),
+      "@helios/workspace": resolve(
+        __dirname,
+        "packages/workspace/src/index.ts",
+      ),
     },
   },
   test: {
