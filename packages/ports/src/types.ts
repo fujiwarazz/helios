@@ -5,7 +5,7 @@
 // ============================================================================
 
 export interface Disposable {
-  dispose(): void | Promise<void>;
+  dispose(): void;
 }
 
 export interface Logger {
