@@ -58,10 +58,11 @@ export interface RunTurnLoopResult {
  */
 export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoopResult> {
   const { deps, runId, llmOptions } = params;
+  const existingMessageIds = new Set(params.tree.pathToHead().map((message) => message.id));
   const trace = deps.tracer.startRun({
     name: "helios.agent_turn",
     runType: "chain",
-    input: params.pendingLeadMessages,
+    input: { messages: params.pendingLeadMessages },
     metadata: {
       sessionId: deps.sessionId,
       runId,
@@ -85,7 +86,12 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
     if (deps.signal.aborted) status = "cancelled";
     await trace.end({
       status,
-      output: result && { turnIds: result.turnIds, reachedMaxTurns: result.reachedMaxTurns },
+      output:
+        result && {
+          turnIds: result.turnIds,
+          reachedMaxTurns: result.reachedMaxTurns,
+          messages: params.tree.pathToHead().filter((message) => !existingMessageIds.has(message.id)),
+        },
       error: thrown ?? result?.runError,
     });
   }
@@ -167,7 +173,7 @@ async function runTurnLoopInternal(params: RunTurnLoopParams, trace: TraceRun): 
       const llmTrace = trace.startChild({
         name: "helios.llm.stream",
         runType: "llm",
-        input: { messages: path, tools: toolRegistry.list(), options: effective },
+        input: { messages: path, tools: traceableTools(toolRegistry.list()), options: effective },
         metadata: { provider: usedProvider.id, turnId, retryCount },
       });
       let streamThrown: unknown;
@@ -192,7 +198,12 @@ async function runTurnLoopInternal(params: RunTurnLoopParams, trace: TraceRun): 
       } finally {
         await llmTrace.end({
           status: signal.aborted ? "cancelled" : streamThrown || streamed?.streamError ? "error" : "success",
-          output: streamed && { stopReason: streamed.stopReason, usage: streamed.usage },
+          output:
+            streamed && {
+              assistant: streamed.assistantMsg,
+              stopReason: streamed.stopReason,
+              usage: streamed.usage,
+            },
           error: streamThrown ?? streamed?.streamError,
         });
       }
@@ -294,6 +305,10 @@ async function runTurnLoopInternal(params: RunTurnLoopParams, trace: TraceRun): 
   const outcomeStatus: TaskOutcome["status"] = signal.aborted ? "cancelled" : runError ? "failure" : "success";
   const costReport = await dispatchRunEnd(runtimes, runId, { status: outcomeStatus });
   return { turnIds, runError, reachedMaxTurns: turnIndex >= maxTurns, costReport };
+}
+
+function traceableTools(tools: import("@helios/ports").Tool[]): Array<Pick<import("@helios/ports").Tool, "name" | "description" | "inputSchema">> {
+  return tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }));
 }
 
 interface RouteSignalState {

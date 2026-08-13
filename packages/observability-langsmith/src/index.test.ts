@@ -55,4 +55,21 @@ describe("createLangSmithTracer", () => {
     expect(rootPayload.dotted_order).toMatch(/^20260813T000000000001Z[0-9a-f-]{36}$/);
     expect(childPayload.dotted_order).toMatch(new RegExp(`^${rootPayload.dotted_order}\\.20260813T000000000001Z[0-9a-f-]{36}$`));
   });
+
+  it("keeps token usage visible while redacting credentials", async () => {
+    const createRun = vi.fn().mockResolvedValue(undefined);
+    const updateRun = vi.fn().mockResolvedValue(undefined);
+    const tracer = createLangSmithTracer(
+      { LANGSMITH_TRACING: "true", LANGSMITH_API_KEY: "test-key" },
+      { client: { createRun, updateRun } },
+    );
+
+    const run = tracer.startRun({ name: "llm", runType: "llm" });
+    await run.end({ status: "success", output: { outputTokens: 42, apiKey: "secret" } });
+
+    expect(updateRun).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ outputs: { outputTokens: 42, apiKey: "[REDACTED]" } }),
+    );
+  });
 });

@@ -28,22 +28,23 @@ interface RecordedRun {
   name: string;
   runType: string;
   parentId?: string;
-  result?: { status: string };
+  input?: unknown;
+  result?: { status: string; output?: unknown };
 }
 
 class RecordingTracer {
   readonly runs: RecordedRun[] = [];
 
-  startRun(input: { name: string; runType: string }) {
+  startRun(input: { name: string; runType: string; input?: unknown }) {
     return this.createRun(input, undefined);
   }
 
-  private createRun(input: { name: string; runType: string }, parentId: string | undefined) {
-    const run: RecordedRun = { id: String(this.runs.length), name: input.name, runType: input.runType, parentId };
+  private createRun(input: { name: string; runType: string; input?: unknown }, parentId: string | undefined) {
+    const run: RecordedRun = { id: String(this.runs.length), name: input.name, runType: input.runType, parentId, input: input.input };
     this.runs.push(run);
     return {
-      startChild: (child: { name: string; runType: string }) => this.createRun(child, run.id),
-      end: async (result: { status: string }) => {
+      startChild: (child: { name: string; runType: string; input?: unknown }) => this.createRun(child, run.id),
+      end: async (result: { status: string; output?: unknown }) => {
         run.result = result;
       },
     };
@@ -109,6 +110,19 @@ describe("LangSmith trace hierarchy", () => {
         }),
       ]),
     );
+  });
+
+  it("records structured messages and the final assistant response", async () => {
+    const tracer = new RecordingTracer();
+    const { session } = await bootSession("mockLlmTextOnly.ts", [], undefined, { tracer });
+
+    await session.sendMessage("show me the response");
+
+    const root = tracer.runs.find((run) => run.name === "helios.agent_turn");
+    const llm = tracer.runs.find((run) => run.name === "helios.llm.stream");
+    expect(root?.input).toMatchObject({ messages: [expect.objectContaining({ content: "show me the response" })] });
+    expect(root?.result?.output).toMatchObject({ messages: expect.arrayContaining([expect.objectContaining({ role: "assistant" })]) });
+    expect(llm?.result?.output).toMatchObject({ assistant: expect.objectContaining({ role: "assistant" }) });
   });
 
   it("records every tool invocation beneath the agent turn", async () => {

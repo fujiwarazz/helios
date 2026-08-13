@@ -47,7 +47,7 @@ const envSchema = z.object({
 const REDACTED = "[REDACTED]";
 const MAX_STRING_LENGTH = 8_192;
 const MAX_COLLECTION_ENTRIES = 100;
-const sensitiveKey = /api[_-]?key|authorization|cookie|password|secret|token/i;
+const sensitiveKey = /^(?:api[_-]?key|authorization|cookie|password|secret|access[_-]?token|auth[_-]?token)$/i;
 
 /**
  * 从宿主环境创建 LangSmith tracer。无配置或配置无效时回退为 no-op，
