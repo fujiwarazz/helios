@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type {
   Message,
@@ -32,6 +32,16 @@ interface PersistedCompaction {
 }
 
 class UnsupportedPersistedSchemaError extends Error {}
+
+async function writeFileAtomic(file: string, content: string): Promise<void> {
+  const temporary = `${file}.${uid("tmp")}`;
+  try {
+    await writeFile(temporary, content, "utf8");
+    await rename(temporary, file);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
 
 export interface SessionOptions {
   id: string;
@@ -446,7 +456,8 @@ export class Session {
       await this.writeTurnLog();
       await this.writeMeta();
     } catch (err) {
-      this.opts.logger.warn(`turn 持久化失败：${err instanceof Error ? err.message : String(err)}`);
+      this.turnLog.pop();
+      throw err;
     }
   }
 
@@ -458,7 +469,7 @@ export class Session {
     const dir = this.turnsDir();
     await mkdir(dir, { recursive: true });
     const body = this.turnLog.map((r) => JSON.stringify(r)).join("\n");
-    await writeFile(join(dir, "turns.jsonl"), body ? body + "\n" : "", "utf8");
+    await writeFileAtomic(join(dir, "turns.jsonl"), body ? body + "\n" : "");
   }
 
   private async writeMeta(): Promise<void> {
@@ -474,7 +485,7 @@ export class Session {
       lastRunIndex: last?.runIndex ?? -1,
       lastTurnIndex: last?.turnIndex ?? -1,
     };
-    await writeFile(join(dir, "kernel-meta.json"), JSON.stringify(meta, null, 2), "utf8");
+    await writeFileAtomic(join(dir, "kernel-meta.json"), `${JSON.stringify(meta, null, 2)}\n`);
   }
 
   /** 全量重写压缩记录（含 summary 节点内容），供跨 resume 恢复压缩视图。 */
@@ -495,7 +506,7 @@ export class Session {
         return JSON.stringify(rec);
       })
       .join("\n");
-    await writeFile(join(dir, "compactions.jsonl"), body ? body + "\n" : "", "utf8");
+    await writeFileAtomic(join(dir, "compactions.jsonl"), body ? body + "\n" : "");
   }
 
   /**

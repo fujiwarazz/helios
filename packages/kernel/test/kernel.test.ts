@@ -82,6 +82,27 @@ describe("Kernel 集成 —— 纯文本 turn", () => {
     );
     expect(jsonl.trim().split("\n")).toHaveLength(1);
   });
+
+  it("rejects the run when turn history cannot be persisted", async () => {
+    const blockedRoot = join(workDir, "blocked-session-root");
+    await writeFile(blockedRoot, "not a directory", "utf8");
+    const kernel = new Kernel({
+      workDir,
+      sessionDataRoot: blockedRoot,
+      manifest: {
+        plugins: [
+          { port: "FileSystemPort", package: "@helios/fs-node" },
+          { port: "LLMProvider", package: fixture("mockLlmTextOnly.ts") },
+        ],
+      },
+      logger: capturingLogger().logger,
+    });
+    await kernel.start();
+
+    await expect(
+      kernel.createSession({ askQuestion: noAsk }).sendMessage("must persist"),
+    ).rejects.toThrow();
+  });
 });
 
 describe("Kernel 集成 —— 工具调用 turn 循环", () => {
