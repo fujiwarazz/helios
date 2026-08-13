@@ -32,6 +32,7 @@
 - 用 Sandbox overlay、文件系统 journal 或 pre/post tree diff 覆盖 Bash、格式化器和 LSP 写入。
 - 将变更尽量归因到 toolUseId；无法精确归因时至少绑定 turnId。
 - EditRecord 大文件改用 blob/hash，避免在 JSONL 重复保存完整 before/after。
+- 引入 overlay/文件 journal，能证明每个变更来源后再开放安全文件 rollback；在此之前平台只回退对话 HEAD。
 
 ### 5. 共享 App Shell 与 In-process Transport
 
@@ -39,24 +40,31 @@
 - 为嵌入式消费方增加 In-process Transport，避免必须伪装成 WS 或 Electron IPC。
 - 保持 Workspace RPC 与 Session RPC 传输无关。
 
+### 6. 远程 Web 部署与鉴权
+
+- 首期 Web Host 强制 loopback；开放非 loopback 监听前必须完成此项。
+- 增加用户认证、Session、Origin/CSRF 校验和 WebSocket 握手鉴权。
+- Workspace/Session/Clone/Agent RPC 全部做 owner/tenant 授权，不以“隐藏入口”代替权限。
+- 加入登录过期、跨用户 workspaceId 猜测、恶意 Origin 和重放请求测试。
+
 ## P2：云端数据与 Runtime
 
-### 6. 云 Metadata Store
+### 7. 云 Metadata Store
 
 - 为 WorkspaceCatalog、SessionCatalog、BindingStore、MemoryStore、EditRecordStore 提供数据库/对象存储实现。
 - 引入 tenantId/userId，所有主键和查询都带租户边界。
-- 加入 schemaVersion、幂等键、乐观锁、软删除和审计日志。
+- 延续首期本地 Store 的 schemaVersion/migrator 约定，并加入幂等键、乐观锁、软删除和审计日志。
 - 本地 Workspace 可选择只把 metadata/会话数据上云，代码仍留在本地。
 - 明确端到端加密、数据保留和导出/删除策略。
 
-### 7. Cloud Sandbox Runtime
+### 8. Cloud Sandbox Runtime
 
 - RuntimeRegistry 支持 `local` 与 `cloud-sandbox` provider。
 - Sandbox 按 binding 拉取/挂载 Workspace，返回 runtimeId 和 materialized roots。
 - 加入启动、休眠、恢复、超时、配额、网络策略、密钥注入和日志收集。
 - Session 恢复必须先验证 runtime 状态；失效时可重新物化，但保持 workspaceId/rootId 不变。
 
-### 8. Workspace Replica 与跨 Sandbox 同步
+### 9. Workspace Replica 与跨 Sandbox 同步
 
 - 定义 `WorkspaceReplica { workspaceId, replicaId, runtimeId, revision, state }`。
 - Git 仓库优先用 commit/branch/patch 作为同步协议；非 Git Chat Workspace 需要对象清单和内容寻址 blob。
@@ -64,7 +72,7 @@
 - Workspace Memory 独立版本化，不能靠复制整个运行目录同步。
 - 在该能力完成前，禁止产品承诺跨 Sandbox 实时共享文件。
 
-### 9. 云端 Git 凭据
+### 10. 云端 Git 凭据
 
 - 凭据只通过 Secret Manager 注入短生命周期 Sandbox，不写 Catalog/Session。
 - 支持 GitHub/GitLab App、OAuth token、Deploy Key 和 known_hosts 管理。
@@ -72,19 +80,19 @@
 
 ## P3：远程开发与高级协作
 
-### 10. SSH Runtime
+### 11. SSH Runtime
 
 - 与“SSH URL 执行 git clone”严格区分：SSH Runtime 在远端机器执行工具。
 - 定义远端健康检查、目录 allowlist、命令取消、端口转发、凭据和日志模型。
 - MaterializedWorkspace 路径属于远端 runtime，消费端不得当成本机路径打开。
 
-### 11. Worktree/分支生命周期管理
+### 12. Worktree/分支生命周期管理
 
 - Worktree 列表、清理、孤儿检测、锁和磁盘配额。
 - 从默认分支创建、从已有分支附着、完成后选择保留/提交/删除。
 - 检测 direct 模式脏工作区并提供显式策略。
 
-### 12. 多人共享 Workspace 与权限
+### 13. 多人共享 Workspace 与权限
 
 - Workspace owner/member/role 权限模型。
 - 读、写、执行、管理 Git 凭据和查看 Session 的权限拆分。
