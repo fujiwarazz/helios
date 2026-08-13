@@ -25,6 +25,7 @@ import {
   WorkspacePaths,
 } from "@helios/workspace";
 import { selectAndImportDirectory } from "./directoryDialog";
+import { assertTrustedIpcEvent } from "./ipcSecurity";
 
 const CONFIG_PATH = fileURLToPath(new URL("../../../helios.config.json", import.meta.url));
 const DEV_SERVER_URL = process.env.HELIOS_ELECTRON_DEV_URL ?? "http://localhost:5174";
@@ -49,14 +50,26 @@ function createMainBridge(win: BrowserWindow): ElectronIpcBridge {
       win.webContents.send("helios:message", { connectionId, data });
     },
     onMessage(cb) {
-      const listener = (_event: IpcMainEvent, payload: { connectionId: string; data: string }) =>
-        cb(payload.connectionId, payload.data);
+      const listener = (event: IpcMainEvent, payload: { connectionId: string; data: string }) => {
+        try {
+          assertTrustedIpcEvent(event, win);
+          cb(payload.connectionId, payload.data);
+        } catch {
+          return;
+        }
+      };
       ipcMain.on("helios:message", listener);
       return { dispose: () => ipcMain.removeListener("helios:message", listener) };
     },
     onClose(cb) {
-      const listener = (_event: IpcMainEvent, payload: { connectionId: string }) =>
-        cb(payload.connectionId);
+      const listener = (event: IpcMainEvent, payload: { connectionId: string }) => {
+        try {
+          assertTrustedIpcEvent(event, win);
+          cb(payload.connectionId);
+        } catch {
+          return;
+        }
+      };
       ipcMain.on("helios:close", listener);
       return { dispose: () => ipcMain.removeListener("helios:close", listener) };
     },
@@ -66,9 +79,14 @@ function createMainBridge(win: BrowserWindow): ElectronIpcBridge {
   };
 }
 
-function onConnect(handler: (request: ElectronConnectRequest) => Promise<void>): Disposable {
-  const listener = (_event: IpcMainInvokeEvent, request: ElectronConnectRequest) =>
-    handler(request);
+function onConnect(
+  win: BrowserWindow,
+  handler: (request: ElectronConnectRequest) => Promise<void>,
+): Disposable {
+  const listener = (event: IpcMainInvokeEvent, request: ElectronConnectRequest) => {
+    assertTrustedIpcEvent(event, win);
+    return handler(request);
+  };
   ipcMain.handle("helios:connect", listener);
   return { dispose: () => ipcMain.removeHandler("helios:connect") };
 }
@@ -117,14 +135,15 @@ async function createWindow(): Promise<void> {
       sessions,
       repositories,
       bridge: createMainBridge(win),
-      onConnect,
+      onConnect: (handler) => onConnect(win, handler),
       codeMode: CODE_MODE,
       allowLocalImport: false,
     });
 
     if (CODE_MODE) {
-      ipcMain.handle("helios:select-and-import-directory", async () =>
-        selectAndImportDirectory(
+      ipcMain.handle("helios:select-and-import-directory", async (event) => {
+        assertTrustedIpcEvent(event, win);
+        return selectAndImportDirectory(
           {
             showOpenDialog: async (_window, options) =>
               dialog.showOpenDialog(win, options),
@@ -140,8 +159,8 @@ async function createWindow(): Promise<void> {
               return authorizedRepositories.importLocalDirectory(path);
             },
           },
-        ),
-      );
+        );
+      });
       directoryHandlerRegistered = true;
     }
 
@@ -157,8 +176,13 @@ async function createWindow(): Promise<void> {
       void lease.dispose();
     });
 
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     if (existsSync(DIST_INDEX)) await win.loadFile(DIST_INDEX);
     else await win.loadURL(DEV_SERVER_URL);
+    const rendererUrl = win.webContents.getURL();
+    win.webContents.on("will-navigate", (event, url) => {
+      if (url !== rendererUrl) event.preventDefault();
+    });
     console.info(
       "helios Electron Workspace Host ready; Code mode " + (CODE_MODE ? "enabled" : "disabled"),
     );
