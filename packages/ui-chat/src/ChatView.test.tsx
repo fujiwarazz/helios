@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { act, render, fireEvent, screen, cleanup } from "@testing-library/react";
 import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
@@ -45,6 +45,86 @@ function makeMockClient(): {
 }
 
 describe("ChatView", () => {
+  it("renders a composer header above the textarea", () => {
+    const { client } = makeMockClient();
+    render(
+      <ChatView
+        client={client}
+        composerHeader={<div data-testid="workspace-composer">repo</div>}
+      />,
+    );
+
+    const header = screen.getByTestId("workspace-composer");
+    const input = screen.getByTestId("chat-input");
+    expect(header.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("can disable submit from both the button and Enter", async () => {
+    const { client, sent } = makeMockClient();
+    render(<ChatView client={client} canSubmit={false} />);
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "hello" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      fireEvent.click(screen.getByTestId("send-button"));
+    });
+
+    expect((screen.getByTestId("send-button") as HTMLButtonElement).disabled).toBe(true);
+    expect(sent).toEqual([]);
+    expect(input.value).toBe("hello");
+  });
+
+  it("awaits onBeforeSubmit before sending", async () => {
+    const { client, sent } = makeMockClient();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const before = vi.fn(() => gate);
+    render(<ChatView client={client} onBeforeSubmit={before} />);
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByTestId("send-button"));
+
+    expect(before).toHaveBeenCalledWith("hello");
+    expect(sent).toEqual([]);
+    await act(async () => release());
+    expect(sent).toEqual(["hello"]);
+    expect(input.value).toBe("");
+  });
+
+  it("retains the textarea when onBeforeSubmit fails", async () => {
+    const { client, sent } = makeMockClient();
+    render(
+      <ChatView
+        client={client}
+        onBeforeSubmit={async () => {
+          throw new Error("workspace unavailable");
+        }}
+      />,
+    );
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    await act(async () => fireEvent.click(screen.getByTestId("send-button")));
+
+    expect(sent).toEqual([]);
+    expect(input.value).toBe("hello");
+  });
+
+  it("calls onFirstSubmitted once after the first successful send", async () => {
+    const { client } = makeMockClient();
+    const onFirstSubmitted = vi.fn();
+    render(<ChatView client={client} onFirstSubmitted={onFirstSubmitted} />);
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "one" } });
+    await act(async () => fireEvent.click(screen.getByTestId("send-button")));
+    fireEvent.change(input, { target: { value: "two" } });
+    await act(async () => fireEvent.click(screen.getByTestId("send-button")));
+
+    expect(onFirstSubmitted).toHaveBeenCalledTimes(1);
+  });
+
   it("输入并发送 → 调用 sendMessage", async () => {
     const { client, sent } = makeMockClient();
     render(<ChatView client={client} />);
@@ -120,6 +200,31 @@ describe("ChatView", () => {
       await act(async () => {
         fireEvent.click(btns[0]);
       });
+      expect(rolled).toEqual(["sess-0-0"]);
+    } finally {
+      window.confirm = realConfirm;
+    }
+  });
+
+  it("describes workspace rollback as conversation-only", async () => {
+    const rolled: string[] = [];
+    const { client, emit } = makeMockClient();
+    client.rollback = async (id) => {
+      rolled.push(id);
+    };
+    const realConfirm = window.confirm;
+    window.confirm = vi.fn(() => true);
+    try {
+      render(<ChatView client={client} rollbackMode="conversation-only" />);
+      await act(async () => {
+        emit({ type: "message_start", messageId: "m1", role: "assistant", turnId: "sess-0-0" });
+        emit({ type: "turn_end", turnId: "sess-0-0", toolResults: [] });
+        emit({ type: "agent_end", runId: "r1", turnIds: ["sess-0-0"], newMessages: [] });
+      });
+      const button = screen.getByTestId("rollback-button");
+      expect(button.getAttribute("title")).toContain("回退对话，不修改文件");
+      await act(async () => fireEvent.click(button));
+      expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("不修改文件"));
       expect(rolled).toEqual(["sess-0-0"]);
     } finally {
       window.confirm = realConfirm;

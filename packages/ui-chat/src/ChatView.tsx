@@ -4,7 +4,7 @@
 // + 审批卡片 + 多行输入(Enter 发送 / Shift+Enter 换行)+ 发送/停止。
 // ============================================================================
 
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type { RenderTool } from "./useChat";
 import { useChat } from "./useChat";
 import { Markdown } from "./Markdown";
@@ -15,6 +15,11 @@ export interface ChatViewProps {
   renderTool?: RenderTool;
   placeholder?: string;
   examplePrompts?: string[];
+  composerHeader?: ReactNode;
+  canSubmit?: boolean;
+  onBeforeSubmit?: (text: string) => void | Promise<void>;
+  onFirstSubmitted?: () => void;
+  rollbackMode?: "full" | "conversation-only";
 }
 
 const DEFAULT_EXAMPLES = [
@@ -52,11 +57,13 @@ function MessageBubble({
   streaming,
   canRollback,
   onRollback,
+  rollbackMode,
 }: {
   msg: ChatMessageView;
   streaming: boolean;
   canRollback: boolean;
   onRollback: (turnId: string) => void;
+  rollbackMode: "full" | "conversation-only";
 }): JSX.Element {
   const isAssistant = msg.role === "assistant";
   const showCursor = streaming && isAssistant;
@@ -94,9 +101,17 @@ function MessageBubble({
             data-testid="rollback-button"
             className="helios-rollback"
             type="button"
-            title="丢弃此处之后的对话,回到这个检查点重新开始"
+            title={
+              rollbackMode === "conversation-only"
+                ? "回退对话，不修改文件"
+                : "丢弃此处之后的对话,回到这个检查点重新开始"
+            }
             onClick={() => {
-              if (window.confirm("回到这个检查点?此后的对话将被丢弃(可从这里重聊)。")) {
+              const prompt =
+                rollbackMode === "conversation-only"
+                  ? "回退对话，不修改文件？此后的对话将被丢弃。"
+                  : "回到这个检查点?此后的对话将被丢弃(可从这里重聊)。";
+              if (window.confirm(prompt)) {
                 onRollback(msg.rollbackTurnId!);
               }
             }}
@@ -208,6 +223,11 @@ export function ChatView({
   renderTool,
   placeholder,
   examplePrompts,
+  composerHeader,
+  canSubmit = true,
+  onBeforeSubmit,
+  onFirstSubmitted,
+  rollbackMode = "full",
 }: ChatViewProps): JSX.Element {
   const {
     messages,
@@ -223,13 +243,29 @@ export function ChatView({
     answer,
   } = useChat(client, { renderTool });
   const [input, setInput] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const firstSubmittedRef = useRef(false);
 
-  const onSend = (): void => {
+  const onSend = async (): Promise<void> => {
     const t = input.trim();
-    if (!t) return;
-    setInput("");
-    void send(t);
+    if (!t || !canSubmit || isStreaming || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onBeforeSubmit?.(t);
+      const sent = await send(t);
+      if (!sent) return;
+      setInput("");
+      if (!firstSubmittedRef.current) {
+        firstSubmittedRef.current = true;
+        onFirstSubmitted?.();
+      }
+    } catch {
+      // The caller owns pre-submit error presentation. Keeping the input lets the
+      // user correct the workspace selection or retry without retyping.
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const fillPrompt = (text: string): void => {
@@ -262,6 +298,7 @@ export function ChatView({
               streaming={isStreaming && i === messages.length - 1}
               canRollback={canRollback}
               onRollback={(turnId) => void rollback(turnId)}
+              rollbackMode={rollbackMode}
             />
           ))
         )}
@@ -270,42 +307,45 @@ export function ChatView({
         ) : null}
       </div>
 
-      <div className="helios-input-row">
-        <textarea
-          ref={taRef}
-          data-testid="chat-input"
-          className="helios-input"
-          rows={1}
-          value={input}
-          placeholder={placeholder ?? "输入消息…(Enter 发送 / Shift+Enter 换行)"}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              onSend();
-            }
-          }}
-        />
-        {isStreaming && canStop ? (
-          <button
-            data-testid="stop-button"
-            className="helios-send helios-stop"
-            type="button"
-            onClick={() => void stop()}
-          >
-            停止
-          </button>
-        ) : (
-          <button
-            data-testid="send-button"
-            className="helios-send"
-            type="button"
-            disabled={isStreaming || !input.trim()}
-            onClick={onSend}
-          >
-            发送
-          </button>
-        )}
+      <div className="helios-composer">
+        {composerHeader ? <div className="helios-composer-header">{composerHeader}</div> : null}
+        <div className="helios-input-row">
+          <textarea
+            ref={taRef}
+            data-testid="chat-input"
+            className="helios-input"
+            rows={1}
+            value={input}
+            placeholder={placeholder ?? "输入消息…(Enter 发送 / Shift+Enter 换行)"}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void onSend();
+              }
+            }}
+          />
+          {isStreaming && canStop ? (
+            <button
+              data-testid="stop-button"
+              className="helios-send helios-stop"
+              type="button"
+              onClick={() => void stop()}
+            >
+              停止
+            </button>
+          ) : (
+            <button
+              data-testid="send-button"
+              className="helios-send"
+              type="button"
+              disabled={!canSubmit || isStreaming || isSubmitting || !input.trim()}
+              onClick={() => void onSend()}
+            >
+              发送
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
