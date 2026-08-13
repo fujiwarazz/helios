@@ -15,6 +15,7 @@ import type { HookRunner } from "../hookRunner";
 import type { AgentEventEmitter } from "../events";
 import type { LlmRetryOptions } from "./retryBackoff";
 import type { ArtifactAction, FileEditObservation } from "../kernel";
+import type { Tracer } from "@helios/observability-langsmith";
 
 /** tool_use 内容块的类型别名，供 streamAssistant/executeTools 共用，避免重复 Extract<...>。 */
 export type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
@@ -68,6 +69,7 @@ export interface RunLoopDeps {
   fileSystem: FileSystemPort;
   recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
   markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  tracer: Tracer;
 }
 
 /**

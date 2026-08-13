@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@helios/observability-langsmith": "workspace:*",
     "@helios/ports": "workspace:*",
     "execa": "^9.5.2",
     "html-to-text": "^9.0.5"

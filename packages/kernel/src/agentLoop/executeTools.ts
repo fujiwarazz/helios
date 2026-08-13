@@ -6,6 +6,7 @@ import type { AgentEventEmitter, ToolResultRecord } from "../events";
 import type { ToolUseBlock } from "./types";
 import { stableStringify } from "./canonical";
 import { dispatchCacheVersion, dispatchBeforeTool, dispatchAfterTool } from "./runtimeDispatch";
+import type { TraceRun } from "@helios/observability-langsmith";
 
 export interface ExecuteToolsParams {
   turnId: string;
@@ -24,6 +25,7 @@ export interface ExecuteToolsParams {
   fileSystem: import("@helios/ports").FileSystemPort;
   recordEdit?: import("./types").RunLoopDeps["recordEdit"];
   markAuditGap?: import("./types").RunLoopDeps["markAuditGap"];
+  trace: TraceRun;
 }
 
 export interface ExecuteToolsResult {
@@ -49,6 +51,7 @@ interface ToolExecCtx {
   fileSystem: import("@helios/ports").FileSystemPort;
   recordEdit?: import("./types").RunLoopDeps["recordEdit"];
   markAuditGap?: import("./types").RunLoopDeps["markAuditGap"];
+  trace: TraceRun;
 }
 
 /**
@@ -70,6 +73,7 @@ export async function executeTools(params: ExecuteToolsParams): Promise<ExecuteT
     fileSystem: params.fileSystem,
     recordEdit: params.recordEdit,
     markAuditGap: params.markAuditGap,
+    trace: params.trace,
   };
 
   const allParallel =
@@ -112,6 +116,12 @@ async function buildCacheKey(ctx: ToolExecCtx, tool: Tool, input: unknown): Prom
 /** 单个工具的 PreToolUse → ask → (cache) execute → PostToolUse → emit start/end 全流程。 */
 async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<OneToolCallResult> {
   const { parseErrorIds, toolRegistry, hooks, sessionId, toolCtx, events, runtimes, runId } = ctx;
+  const toolTrace = ctx.trace.startChild({
+    name: `helios.tool.${block.name}`,
+    runType: "tool",
+    input: block.input,
+    metadata: { sessionId, toolUseId: block.id },
+  });
   let input = block.input;
   let output: unknown;
   let isError = false;
@@ -131,6 +141,10 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
       { name: block.name, cacheHit, executed },
       cacheKey && cacheWrite ? { key: cacheKey, result: cacheWrite.result, ttlMs: cacheWrite.ttlMs } : undefined,
     );
+    await toolTrace.end({
+      status: toolCtx.signal?.aborted ? "cancelled" : isError ? "error" : "success",
+      output: { output, isError, cacheHit, executed },
+    });
     return {
       resultBlock: { type: "tool_result", toolUseId: block.id, output, isError },
       record: { toolUseId: block.id, name: block.name, output, isError },

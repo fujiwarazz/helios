@@ -19,6 +19,7 @@ import { uid } from "./ids";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createLangSmithTracer, type Tracer } from "@helios/observability-langsmith";
 
 /** 只读的 port/工具聚合信息，供 UI 的 Ports 页展示。 */
 export interface PortInfo {
@@ -44,6 +45,8 @@ export interface KernelOptions {
   hookCommandTimeoutMs?: number;
   /** Disable unsafe built-in tools for constrained hosts (for example Workspace sessions). */
   disabledBuiltinTools?: string[];
+  /** Optional observability adapter. Defaults to the LangSmith environment configuration. */
+  tracer?: Tracer;
 }
 
 export interface CreateSessionOptions {
@@ -80,11 +83,13 @@ export class Kernel {
   private readonly renderers = new Map<string, ToolRenderer>();
   private readonly ports = createLivePortRegistry(this.services, this.llm);
   private readonly pluginDisposables: Array<{ dispose(): void | Promise<void> }> = [];
+  private readonly tracer: Tracer;
   private started = false;
   private disposePromise: Promise<void> | undefined;
 
   constructor(private readonly opts: KernelOptions) {
     this.logger = opts.logger ?? consoleLogger();
+    this.tracer = opts.tracer ?? createLangSmithTracer();
     // HookRunner 依赖 this.logger 记录 handler 异常，字段初始化器早于构造函数体（this.logger 此时
     // 尚未赋值），故延后到这里构造，而不是像其它字段那样用类字段初始化器。
     this.hooks = new HookRunner(this.logger);
@@ -196,6 +201,7 @@ export class Kernel {
       markAuditGap: opts.markAuditGap,
       acquireMutationLease: opts.acquireMutationLease,
       rollbackPolicy: opts.rollbackPolicy,
+      tracer: this.tracer,
     });
   }
 
