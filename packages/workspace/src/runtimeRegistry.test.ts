@@ -120,6 +120,27 @@ describe("LocalRuntimeRegistry", () => {
     expect(third.kernel).not.toBe(first.kernel);
   });
 
+  it("creates only one runtime when matching sessions start concurrently", async () => {
+    const local = join(allowedRoot, "concurrent-repo");
+    await mkdir(local);
+    const workspace = await repositories.importLocalDirectory(local);
+    const registry = createRegistry();
+    const launch = {
+      mode: "code" as const,
+      workspaceId: workspace.id,
+      roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" as const }],
+    };
+
+    const [first, second] = await Promise.all([
+      registry.createSession(launch, { askQuestion: noAsk }),
+      registry.createSession(launch, { askQuestion: noAsk }),
+    ]);
+
+    expect(second.kernel).toBe(first.kernel);
+    await registry.release(first.binding.runtimeId!);
+    await registry.release(second.binding.runtimeId!);
+  });
+
   it("resumes from the persisted binding rather than process.cwd", async () => {
     const local = join(allowedRoot, "repo");
     await mkdir(local);
@@ -161,15 +182,19 @@ describe("LocalRuntimeRegistry", () => {
     ).rejects.toMatchObject({ code: "WORKSPACE_UNAVAILABLE" });
   });
 
-  it("scavenges only expired uncommitted Chat drafts", async () => {
+  it("removes an uncommitted Chat draft when its runtime is released", async () => {
     const registry = createRegistry();
     const draft = await registry.createSession({ mode: "chat" }, { askQuestion: noAsk });
     const draftRoot = paths.managedRoot(draft.binding.workspaceId);
-    await registry.release(draft.binding.runtimeId!);
+    await registry.release(draft.binding.runtimeId!, draft.session.id);
 
-    now = 1_000;
-    await expect(registry.scavengeExpiredDrafts()).resolves.toBe(1);
     await expect(access(draftRoot)).rejects.toBeDefined();
+    await expect(catalog.get(draft.binding.workspaceId)).resolves.toBeUndefined();
+    await expect(registry.scavengeExpiredDrafts()).resolves.toBe(0);
+  });
+
+  it("never removes a committed Chat workspace during draft scavenging", async () => {
+    const registry = createRegistry();
 
     const committed = await registry.createSession({ mode: "chat" }, { askQuestion: noAsk });
     const committedRoot = paths.managedRoot(committed.binding.workspaceId);

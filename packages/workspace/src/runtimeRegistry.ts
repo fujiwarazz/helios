@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   Kernel,
   type CreateSessionOptions,
@@ -37,7 +37,7 @@ export interface RuntimeRegistry {
     options: CreateSessionOptions,
   ): Promise<BoundSession>;
   resumeSession(sessionId: string, options: CreateSessionOptions): Promise<BoundSession>;
-  release(runtimeId: string): Promise<void>;
+  release(runtimeId: string, sessionId?: string): Promise<void>;
   scavengeExpiredDrafts(now?: number): Promise<number>;
 }
 
@@ -95,6 +95,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
   private readonly idFactory: (prefix: "sess" | "mat" | "runtime") => string;
   private readonly kernelFactory: (options: KernelOptions) => Kernel;
   private readonly runtimes = new Map<string, RuntimeEntry>();
+  private readonly runtimeStarts = new Map<string, Promise<RuntimeEntry>>();
   private readonly runtimeKeysById = new Map<string, string>();
   private readonly drafts = new Map<string, DraftEntry>();
   private readonly editRecords?: LocalEditRecordStore;
@@ -200,16 +201,18 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
     }
   }
 
-  async release(runtimeId: string): Promise<void> {
+  async release(runtimeId: string, sessionId?: string): Promise<void> {
     const key = this.runtimeKeysById.get(runtimeId);
     if (!key) return;
     const runtime = this.runtimes.get(key);
     if (!runtime) return;
     runtime.refs -= 1;
-    if (runtime.refs > 0) return;
-    this.runtimes.delete(key);
-    this.runtimeKeysById.delete(runtime.id);
-    await runtime.kernel.dispose();
+    if (runtime.refs === 0) {
+      this.runtimes.delete(key);
+      this.runtimeKeysById.delete(runtime.id);
+      await runtime.kernel.dispose();
+    }
+    if (sessionId) await this.removeUncommittedDraft(sessionId, runtimeId);
   }
 
   async scavengeExpiredDrafts(now = this.now()): Promise<number> {
@@ -220,9 +223,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
         this.drafts.delete(draft.sessionId);
         continue;
       }
-      await this.release(draft.runtimeId);
-      await this.removeDraftFiles(draft);
-      this.drafts.delete(draft.sessionId);
+      await this.release(draft.runtimeId, draft.sessionId);
       removed += 1;
     }
     return removed;
@@ -304,6 +305,27 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       return existing;
     }
 
+    const pending = this.runtimeStarts.get(key);
+    if (pending) {
+      const runtime = await pending;
+      runtime.refs += 1;
+      return runtime;
+    }
+
+    const start = this.startRuntime(key, runtimeManifest, materialized);
+    this.runtimeStarts.set(key, start);
+    try {
+      return await start;
+    } finally {
+      if (this.runtimeStarts.get(key) === start) this.runtimeStarts.delete(key);
+    }
+  }
+
+  private async startRuntime(
+    key: string,
+    runtimeManifest: Manifest,
+    materialized: MaterializedWorkspace,
+  ): Promise<RuntimeEntry> {
     const kernel = this.kernelFactory({
       workDir: materialized.primaryDir,
       sessionDataRoot: join(this.paths.dataRoot, "sessions"),
@@ -321,6 +343,20 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
     this.runtimes.set(key, runtime);
     this.runtimeKeysById.set(runtime.id, key);
     return runtime;
+  }
+
+  private async removeUncommittedDraft(sessionId: string, runtimeId: string): Promise<void> {
+    const draft = this.drafts.get(sessionId);
+    if (!draft || draft.runtimeId !== runtimeId) return;
+    if (await this.sessions.get(sessionId)) {
+      this.drafts.delete(sessionId);
+      return;
+    }
+    await this.removeDraftFiles(draft);
+    if (draft.workspace.kind === "managed-chat") {
+      await this.catalog.delete(draft.workspace.id);
+    }
+    this.drafts.delete(sessionId);
   }
 
   private auditOptions(
@@ -393,6 +429,10 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       } catch {
         await rm(materializedRoot.absolutePath, { recursive: true, force: true });
       }
+      await this.git
+        .run(["branch", "-D", `helios/${rootBinding.materializationId}`], { cwd: source })
+        .catch(() => undefined);
+      await rm(dirname(materializedRoot.absolutePath), { recursive: true, force: true });
     }
     if (draft.workspace.kind === "managed-chat") {
       await rm(this.paths.managedRoot(draft.workspace.id), { recursive: true, force: true });

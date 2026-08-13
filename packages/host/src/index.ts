@@ -388,8 +388,9 @@ export function serveWorkspaceHostOverWs(
     void boundPromise
       .then((bound) => {
         if (disposed) {
-          void bound.session.dispose();
-          void opts.registry.release(bound.binding.runtimeId!);
+          void bound.session.dispose().then(() =>
+            opts.registry.release(bound.binding.runtimeId!, bound.session.id),
+          );
           return;
         }
         const transport = nodeWsServerTransport(conn);
@@ -516,7 +517,9 @@ function bindWorkspaceSession(
       if (disposed) return;
       disposed = true;
       binding.dispose();
-      void services.registry.release(bound.binding.runtimeId!);
+      void bound.session.dispose().then(() =>
+        services.registry.release(bound.binding.runtimeId!, bound.session.id),
+      );
     },
   };
 }

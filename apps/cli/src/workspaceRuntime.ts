@@ -90,7 +90,9 @@ export async function openCliWorkspace(
         closed = true;
         bound?.session.cancel();
         await bound?.session.dispose();
-        if (bound?.binding.runtimeId) await registry?.release(bound.binding.runtimeId);
+        if (bound?.binding.runtimeId) {
+          await registry?.release(bound.binding.runtimeId, bound.session.id);
+        }
         await lease.dispose();
       },
     };
@@ -98,7 +100,7 @@ export async function openCliWorkspace(
     bound?.session.cancel();
     await bound?.session.dispose().catch(() => undefined);
     if (bound?.binding.runtimeId) {
-      await registry?.release(bound.binding.runtimeId).catch(() => undefined);
+      await registry?.release(bound.binding.runtimeId, bound.session.id).catch(() => undefined);
     }
     await lease.dispose();
     throw error;

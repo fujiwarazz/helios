@@ -115,7 +115,10 @@ describe("serveWorkspaceHostOverWs", () => {
     rpc.close();
     await waitFor(() => release.mock.calls.length === 1, 2_000);
 
-    expect(release).toHaveBeenCalledWith(expect.stringMatching(/^runtime_/));
+    expect(release).toHaveBeenCalledWith(
+      expect.stringMatching(/^runtime_/),
+      expect.stringMatching(/^sess_/),
+    );
   });
 
   it("advertises capabilities and disables workspace mutations with Code mode", async () => {

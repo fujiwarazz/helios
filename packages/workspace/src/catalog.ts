@@ -8,6 +8,7 @@ export interface WorkspaceCatalog {
   get(id: string): Promise<Workspace | undefined>;
   list(): Promise<Workspace[]>;
   put(workspace: Workspace): Promise<void>;
+  delete(id: string): Promise<void>;
   createManagedChat(name?: string): Promise<Workspace>;
 }
 
@@ -92,6 +93,10 @@ export class LocalWorkspaceCatalog implements WorkspaceCatalog {
     const file = this.paths.workspaceFile(workspace.id);
     const envelope: WorkspaceEnvelope = { schemaVersion: 1, workspace };
     await writeJsonAtomic(file, envelope);
+  }
+
+  async delete(id: string): Promise<void> {
+    await rm(this.paths.workspaceFile(id), { force: true });
   }
 
   async createManagedChat(name = "New chat"): Promise<Workspace> {
