@@ -435,14 +435,20 @@
 }
 
 /* --- 输入区 --- */
-.helios-input-row {
-  display: flex;
-  align-items: flex-end;
-  gap: var(--h-space-2);
+.helios-composer {
   max-width: var(--h-content-max);
   width: 100%;
   margin: 0 auto;
   padding: var(--h-space-3) var(--h-space-5) var(--h-space-5);
+}
+.helios-composer-header {
+  margin-bottom: var(--h-space-2);
+}
+.helios-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--h-space-2);
+  width: 100%;
 }
 .helios-input {
   flex: 1 1 auto;

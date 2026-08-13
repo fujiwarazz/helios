@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile as fsWrite, mkdir, symlink } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { KernelContext } from "@helios/ports";
-import { create, WorkDirGuard, NoopGuard } from "./index";
+import { create, createGuardedFileSystem, WorkDirGuard, NoopGuard } from "./index";
 
 let workDir: string;
 let outsideDir: string;
@@ -37,6 +37,14 @@ describe("PathGuard 类（可插拔隔离策略）", () => {
 });
 
 describe("fs-node 默认 WorkDirGuard 越界隔离", () => {
+  it("可为平台受信目录创建独立的 guarded FileSystem", async () => {
+    const guarded = createGuardedFileSystem(workDir);
+    await guarded.writeFile("state.txt", "workspace state");
+
+    expect(await guarded.readFile("state.txt")).toBe("workspace state");
+    await expect(guarded.readFile(join(outsideDir, "secret.txt"))).rejects.toThrow(/越界/);
+  });
+
   it("workDir 内读写正常", async () => {
     const f = fs();
     await f.writeFile("sub/a.txt", "hello");

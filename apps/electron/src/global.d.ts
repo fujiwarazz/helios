@@ -9,10 +9,12 @@
 /// <reference types="node" />
 
 import type { ElectronIpcBridge } from "@helios/protocol/browser";
+import type { SessionLaunchRequest, WorkspaceSummary } from "@helios/workspace/types";
 
 export interface ElectronConnectRequest {
   connectionId: string;
   resumeSessionId?: string;
+  launch?: SessionLaunchRequest;
 }
 
 declare global {
@@ -20,6 +22,9 @@ declare global {
     /** preload.ts 通过 contextBridge 暴露;形状 = ElectronIpcBridge + connect()。 */
     helios: ElectronIpcBridge & {
       connect(req: ElectronConnectRequest): Promise<void>;
+    };
+    heliosDesktop: {
+      selectAndImportDirectory(): Promise<WorkspaceSummary | undefined>;
     };
   }
 }

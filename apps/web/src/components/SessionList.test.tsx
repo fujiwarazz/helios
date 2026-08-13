@@ -10,7 +10,15 @@ const now = new Date("2026-08-07T12:00:00").getTime();
 const DAY = 24 * 60 * 60 * 1000;
 
 function meta(id: string, title: string, updatedAt: number): SessionMetaView {
-  return { id, title, createdAt: updatedAt, updatedAt, lastRunIndex: 0, lastTurnIndex: 0 };
+  return {
+    schemaVersion: 1,
+    id,
+    title,
+    createdAt: updatedAt,
+    updatedAt,
+    lastRunIndex: 0,
+    lastTurnIndex: 0,
+  };
 }
 
 describe("SessionList", () => {

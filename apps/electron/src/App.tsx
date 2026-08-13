@@ -1,21 +1,50 @@
-// apps/electron/src/App.tsx —— Electron 渲染进程外壳。
-// 与 apps/web/src/App.tsx 同构,唯一区别是连接建立方式:web 走 browserWsClientTransport(WS),
-// 这里走 connectElectronTransport(Electron IPC,见 ../electronRpc.ts)。壳层(Sidebar/pages/
-// 状态管理)是各自维护的独立文件,不建立共享依赖(见计划文档"UI 下沉边界"一节)。
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChatView, RpcChatClient, type IChatClient, type ConnectionState } from "@helios/ui-chat";
 import { RpcClient } from "@helios/protocol/browser";
+import type {
+  MaterializationStrategy,
+  SessionLaunchRequest,
+  WorkspaceSummary,
+} from "@helios/workspace/types";
 import { Sidebar, type NavView } from "./components/Sidebar";
+import { ModeSwitch } from "./components/ModeSwitch";
+import {
+  WorkspaceComposer,
+  type WorkspaceSelection,
+} from "./components/WorkspaceComposer";
 import { Placeholder } from "./pages/Placeholder";
 import { PortsPage } from "./pages/PortsPage";
 import { connectElectronTransport } from "./electronRpc";
-import { listSessions, listPorts, type SessionMetaView, type PortInfoView } from "./lib/rpc";
-
-// 工具卡片渲染不在这里写:大多数工具的 descriptor 已由 host 用 kernel.getRenderer(name)
-// 算好随事件下发（见 @helios/host bindSession），ChatView 不传 renderTool 时对没注册渲染器
-// 的工具走 @helios/ui-chat 内置的通用兜底。
+import {
+  cloneWorkspace,
+  getHostCapabilities,
+  getSessionWorkspace,
+  listSessions,
+  listPorts,
+  listWorkspaces,
+  type HostCapabilities,
+  type SessionMetaView,
+  type PortInfoView,
+} from "./lib/rpc";
 
 const ACTIVE_SESSION_KEY = "helios.activeSessionId";
+
+export type ComposerState =
+  | { mode: "chat"; locked: boolean }
+  | {
+      mode: "code";
+      locked: false;
+      workspaceId?: string;
+      rootId?: string;
+      strategy: MaterializationStrategy;
+    }
+  | {
+      mode: "code";
+      locked: true;
+      workspaceId: string;
+      rootId: string;
+      strategy: MaterializationStrategy;
+    };
 
 function loadActiveSession(): string | undefined {
   try {
@@ -30,11 +59,35 @@ function saveActiveSession(id: string | undefined): void {
     if (id) window.localStorage.setItem(ACTIVE_SESSION_KEY, id);
     else window.localStorage.removeItem(ACTIVE_SESSION_KEY);
   } catch {
-    /* localStorage 不可用:忽略,退化为刷新丢会话 */
+    // localStorage unavailable: the next launch starts a new Chat.
   }
 }
 
-/** 测试注入 client:直接渲染 ChatView(不需要宿主/侧边栏)。 */
+export function launchForComposer(state: ComposerState): SessionLaunchRequest {
+  if (state.mode === "chat") return { mode: "chat" };
+  if (!state.workspaceId || !state.rootId) return { mode: "chat" };
+  return {
+    mode: "code",
+    workspaceId: state.workspaceId,
+    roots: [{ rootId: state.rootId, strategy: state.strategy }],
+  };
+}
+
+export function shouldResetFailedResume(
+  connection: ConnectionState,
+  activeSessionId: string | undefined,
+): boolean {
+  return connection === "closed" && activeSessionId !== undefined;
+}
+
+export function shouldShowModeComposer(
+  codeModeEnabled: boolean,
+  state: ComposerState,
+  activeSessionId: string | undefined,
+): boolean {
+  return codeModeEnabled && !state.locked && activeSessionId === undefined;
+}
+
 function InjectedApp({ client }: { client: IChatClient }): JSX.Element {
   return (
     <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
@@ -44,30 +97,44 @@ function InjectedApp({ client }: { client: IChatClient }): JSX.Element {
 }
 
 function ManagedApp(): JSX.Element {
-  // activeSessionId=undefined 表示"新会话"(host 新建);切换时置为目标 id 触发重连。
   const [activeSessionId, setActiveSessionId] = useState<string | undefined>(loadActiveSession);
-  // nonce:即使 id 不变(New chat 连续点)也强制重建 client。
+  const [connectedSessionId, setConnectedSessionId] = useState<string>();
   const [nonce, setNonce] = useState(0);
   const [view, setView] = useState<NavView>("chat");
   const [collapsed, setCollapsed] = useState(false);
   const [sessions, setSessions] = useState<SessionMetaView[]>([]);
   const [ports, setPorts] = useState<PortInfoView[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [capabilities, setCapabilities] = useState<HostCapabilities>();
+  const [composer, setComposer] = useState<ComposerState>({ mode: "chat", locked: false });
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [now, setNow] = useState(() => Date.now());
-  const [rpc, setRpc] = useState<RpcClient | undefined>(undefined);
+  const [rpc, setRpc] = useState<RpcClient>();
+  const launch = useMemo(() => launchForComposer(composer), [composer]);
+  const launchKey = JSON.stringify(launch);
 
-  // 每个 activeSessionId/nonce 组合建一条新连接。effect 内建、cleanup 内关。
   useEffect(() => {
-    const client = new RpcClient(() => connectElectronTransport(activeSessionId));
+    const parsedLaunch = JSON.parse(launchKey) as SessionLaunchRequest;
+    const client = new RpcClient(
+      () => connectElectronTransport(activeSessionId, parsedLaunch),
+      { maxReconnects: 0 },
+    );
     setRpc(client);
+    setConnectedSessionId(undefined);
     setConnection("connecting");
-    const sub = client.onState((s) => setConnection(s));
+    const sub = client.onState((state) => {
+      setConnection(state);
+      if (shouldResetFailedResume(state, activeSessionId)) {
+        saveActiveSession(undefined);
+        setActiveSessionId(undefined);
+        setComposer({ mode: "chat", locked: false });
+      }
+    });
     return () => {
       sub.dispose();
       client.close();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, nonce]);
+  }, [activeSessionId, launchKey, nonce]);
 
   const chatClient = useMemo<IChatClient | undefined>(
     () => (rpc ? new RpcChatClient(rpc) : undefined),
@@ -76,51 +143,173 @@ function ManagedApp(): JSX.Element {
 
   const refresh = useCallback(() => {
     if (!rpc) return;
-    listSessions(rpc).then(setSessions).catch(() => {});
-    listPorts(rpc).then(setPorts).catch(() => {});
+    void listSessions(rpc).then(setSessions).catch(() => {});
+    void listPorts(rpc).then(setPorts).catch(() => {});
+    void listWorkspaces(rpc).then(setWorkspaces).catch(() => {});
   }, [rpc]);
 
-  // 连接就绪后:拉会话/端口列表 + 记住真实 sessionId(新会话由 host 生成 id),
-  // 只写 localStorage 用于"下次刷新"resume;不改 activeSessionId(否则会触发重连、断掉当前连接)。
   useEffect(() => {
     if (connection !== "open" || !rpc) return;
+    let alive = true;
     setNow(Date.now());
     refresh();
-    let alive = true;
-    rpc
-      .call("sessionId")
-      .then((id) => {
-        if (alive && typeof id === "string" && id) saveActiveSession(id);
+    void getHostCapabilities(rpc)
+      .then((value) => {
+        if (alive) setCapabilities(value);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (alive) setCapabilities({ codeMode: false, localImport: false, rollbackMode: "conversation-only" });
+      });
+    void rpc.call("sessionId").then((id) => {
+      if (alive && typeof id === "string" && id) setConnectedSessionId(id);
+    }).catch(() => {});
+    if (activeSessionId) {
+      void getSessionWorkspace(rpc)
+        .then((binding) => {
+          if (!alive) return;
+          const root = binding.roots[0];
+          if (binding.mode === "code" && root) {
+            setComposer({
+              mode: "code",
+              locked: true,
+              workspaceId: binding.workspaceId,
+              rootId: root.rootId,
+              strategy: root.strategy,
+            });
+          } else {
+            setComposer({ mode: "chat", locked: true });
+          }
+        })
+        .catch(() => {});
+    }
     return () => {
       alive = false;
     };
-  }, [connection, rpc, refresh]);
+  }, [activeSessionId, connection, refresh, rpc]);
 
   const onNewChat = useCallback(() => {
-    saveActiveSession(undefined); // 清掉旧 id;连上新会话后 effect 会写入其真实 id
+    saveActiveSession(undefined);
     setActiveSessionId(undefined);
-    setNonce((n) => n + 1);
+    setComposer({ mode: "chat", locked: false });
+    setNonce((value) => value + 1);
     setView("chat");
   }, []);
 
   const onSelectSession = useCallback((id: string) => {
     saveActiveSession(id);
     setActiveSessionId(id);
-    setNonce((n) => n + 1);
+    setComposer({ mode: "chat", locked: true });
+    setNonce((value) => value + 1);
     setView("chat");
   }, []);
+
+  const changeMode = (mode: "chat" | "code"): void => {
+    if (composer.locked) return;
+    setActiveSessionId(undefined);
+    saveActiveSession(undefined);
+    setComposer(
+      mode === "chat"
+        ? { mode: "chat", locked: false }
+        : { mode: "code", locked: false, strategy: "direct" },
+    );
+  };
+
+  const changeWorkspace = (selection: WorkspaceSelection): void => {
+    if (composer.locked) return;
+    setActiveSessionId(undefined);
+    saveActiveSession(undefined);
+    setComposer({
+      mode: "code",
+      locked: false,
+      workspaceId: selection.workspaceId,
+      rootId: selection.rootId,
+      strategy: selection.strategy,
+    });
+  };
+
+  const beforeSubmit = (): void => {
+    if (composer.mode === "chat") {
+      setComposer({ mode: "chat", locked: true });
+      return;
+    }
+    if (!composer.workspaceId || !composer.rootId) {
+      throw new Error("请先选择代码仓库");
+    }
+    setComposer({
+      mode: "code",
+      locked: true,
+      workspaceId: composer.workspaceId,
+      rootId: composer.rootId,
+      strategy: composer.strategy,
+    });
+  };
+
+  const firstSubmitted = (): void => {
+    if (connectedSessionId) saveActiveSession(connectedSessionId);
+    refresh();
+  };
+
+  const submitFailed = async (): Promise<void> => {
+    let committed = false;
+    if (rpc && connectedSessionId) {
+      try {
+        committed = (await listSessions(rpc)).some((session) => session.id === connectedSessionId);
+      } catch {
+        committed = false;
+      }
+    }
+    if (committed) return;
+    setComposer((current) => ({ ...current, locked: false }));
+  };
+
+  const composerHeader = shouldShowModeComposer(
+    capabilities?.codeMode === true,
+    composer,
+    activeSessionId,
+  ) ? (
+    <div className="helios-code-composer">
+      <ModeSwitch mode={composer.mode} disabled={composer.locked} onChange={changeMode} />
+      {composer.mode === "code" ? (
+        <WorkspaceComposer
+          workspaces={workspaces}
+          selection={{
+            workspaceId: composer.workspaceId,
+            rootId: composer.rootId,
+            strategy: composer.strategy,
+          }}
+          locked={composer.locked}
+          onChange={changeWorkspace}
+          onClone={async (remoteUrl) => {
+            if (!rpc) return undefined;
+            const workspace = await cloneWorkspace(rpc, remoteUrl);
+            setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
+            return workspace;
+          }}
+          onSelectDirectory={async () => {
+            const workspace = await window.heliosDesktop.selectAndImportDirectory();
+            if (workspace) {
+              setWorkspaces((current) => [workspace, ...current.filter((item) => item.id !== workspace.id)]);
+            }
+            return workspace;
+          }}
+        />
+      ) : null}
+    </div>
+  ) : undefined;
+
+  const canSubmit =
+    connection === "open" &&
+    (composer.mode === "chat" || Boolean(composer.workspaceId && composer.rootId));
 
   return (
     <div className="helios-app" data-collapsed={collapsed ? "true" : "false"}>
       <Sidebar
         collapsed={collapsed}
-        onToggleCollapsed={() => setCollapsed((v) => !v)}
+        onToggleCollapsed={() => setCollapsed((value) => !value)}
         view={view}
         onNavigate={setView}
         sessions={sessions}
-        activeSessionId={activeSessionId}
+        activeSessionId={activeSessionId ?? connectedSessionId}
         connection={connection}
         now={now}
         onNewChat={onNewChat}
@@ -128,11 +317,19 @@ function ManagedApp(): JSX.Element {
       />
       <main className="helios-main">
         {view === "chat" && chatClient ? (
-          <ChatView client={chatClient} />
+          <ChatView
+            client={chatClient}
+            composerHeader={composerHeader}
+            canSubmit={canSubmit}
+            onBeforeSubmit={beforeSubmit}
+            onFirstSubmitted={firstSubmitted}
+            onSubmitFailed={submitFailed}
+            rollbackMode="conversation-only"
+          />
         ) : view === "ports" ? (
           <PortsPage ports={ports} />
         ) : view === "projects" ? (
-          <Placeholder title="Projects" hint="项目隔离(独立 workDir)为后续迭代项。" />
+          <Placeholder title="Projects" hint="Workspace 管理由 Code 输入区提供。" />
         ) : view === "artifacts" ? (
           <Placeholder title="Artifacts" hint="产物管理为后续迭代项。" />
         ) : view === "customize" ? (

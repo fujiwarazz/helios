@@ -27,7 +27,10 @@ beforeEach(async () => {
   return async () => rm(workDir, { recursive: true, force: true });
 });
 
-async function runAndRollback(checkpointPackage: string): Promise<{
+async function runAndRollback(
+  checkpointPackage: string,
+  rollbackPolicy: "full" | "conversation-only" = "full",
+): Promise<{
   createdBeforeRollback: boolean;
   existsAfterRollback: boolean;
   preservedContent: string;
@@ -45,7 +48,7 @@ async function runAndRollback(checkpointPackage: string): Promise<{
 
   const kernel = new Kernel({ workDir, manifest, logger: silent });
   await kernel.start();
-  const session = kernel.createSession({ askQuestion: noAsk });
+  const session = kernel.createSession({ askQuestion: noAsk, rollbackPolicy });
   await session.sendMessage("写个文件");
 
   const createdBeforeRollback = await exists(join(workDir, "roll.txt"));
@@ -76,5 +79,83 @@ describe("P2 Turn 回溯 —— CheckpointPort 从 fs 换成 git，Session 与�
     expect(r.existsAfterRollback).toBe(false);
     expect(r.preservedContent).toBe("keep-me");
     expect(r.historyLen).toBe(1);
+  });
+
+  it("conversation-only 只移动对话 HEAD，不还原 Workspace 文件", async () => {
+    const result = await runAndRollback("@helios/checkpoint-fs", "conversation-only");
+    expect(result.createdBeforeRollback).toBe(true);
+    expect(result.existsAfterRollback).toBe(true);
+    expect(result.historyLen).toBe(1);
+  });
+});
+
+describe("Write/Edit 文件变更归因", () => {
+  it("成功 Write 记录同一 toolUseId 的 before/after 并广播 artifact action", async () => {
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "LLMProvider", package: fixture("mockLlmWrite.ts") },
+      ],
+    };
+    const kernel = new Kernel({ workDir, manifest, logger: silent });
+    await kernel.start();
+    const edits: unknown[] = [];
+    const events: unknown[] = [];
+    const session = kernel.createSession({
+      askQuestion: noAsk,
+      recordEdit: async (edit) => {
+        edits.push(edit);
+        return { workspaceId: "ws_1", rootId: "root_1", relativePath: edit.path };
+      },
+    });
+    session.on((event) => events.push(event));
+
+    await session.sendMessage("write");
+
+    expect(edits).toEqual([
+      expect.objectContaining({
+        toolUseId: "w1",
+        path: "roll.txt",
+        operation: "create",
+        before: undefined,
+        after: "after-turn\n",
+      }),
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "artifact_action",
+        action: "openDiff",
+        workspaceId: "ws_1",
+        rootId: "root_1",
+        relativePath: "roll.txt",
+      }),
+    );
+  });
+
+  it("observer 失败不改变工具成功结果，但会持久化 audit gap 回调", async () => {
+    const manifest: Manifest = {
+      plugins: [
+        { port: "FileSystemPort", package: "@helios/fs-node" },
+        { port: "LLMProvider", package: fixture("mockLlmWrite.ts") },
+      ],
+    };
+    const kernel = new Kernel({ workDir, manifest, logger: silent });
+    await kernel.start();
+    const gaps: unknown[] = [];
+    const session = kernel.createSession({
+      askQuestion: noAsk,
+      recordEdit: async () => {
+        throw new Error("store unavailable");
+      },
+      markAuditGap: async (gap) => {
+        gaps.push(gap);
+      },
+    });
+
+    await expect(session.sendMessage("write")).resolves.toBeDefined();
+    expect(await readFile(join(workDir, "roll.txt"), "utf8")).toBe("after-turn\n");
+    expect(gaps).toEqual([
+      expect.objectContaining({ toolUseId: "w1", reason: "store unavailable" }),
+    ]);
   });
 });

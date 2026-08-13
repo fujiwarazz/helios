@@ -21,6 +21,110 @@
   background: var(--h-bg);
 }
 
+/* --- Chat / Code composer --- */
+.helios-code-composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--h-space-2);
+  padding: var(--h-space-3);
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-lg);
+  background: var(--h-surface);
+}
+.helios-mode-switch {
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 2px;
+  border-radius: var(--h-radius-md);
+  background: var(--h-sidebar);
+}
+.helios-mode-switch button {
+  border: 0;
+  border-radius: var(--h-radius-sm);
+  padding: var(--h-space-1) var(--h-space-3);
+  background: transparent;
+  color: var(--h-text-muted);
+  cursor: pointer;
+}
+.helios-mode-switch button[aria-pressed="true"] {
+  color: var(--h-text);
+  background: var(--h-bg);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 8%);
+}
+.helios-mode-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.helios-workspace-composer,
+.helios-workspace-sources {
+  display: flex;
+  flex-direction: column;
+  gap: var(--h-space-2);
+}
+.helios-workspace-composer > label,
+.helios-workspace-sources > label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--h-space-1);
+  color: var(--h-text-muted);
+  font-size: var(--h-fs-xs);
+}
+.helios-workspace-composer select,
+.helios-workspace-composer input {
+  min-width: 0;
+  border: 1px solid var(--h-border);
+  border-radius: var(--h-radius-sm);
+  padding: var(--h-space-2);
+  color: var(--h-text);
+  background: var(--h-bg);
+}
+.helios-workspace-strategy {
+  display: flex;
+  align-items: center;
+  gap: var(--h-space-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: var(--h-text-muted);
+  font-size: var(--h-fs-xs);
+}
+.helios-workspace-strategy legend {
+  float: left;
+  margin-right: var(--h-space-2);
+}
+.helios-workspace-inline {
+  display: flex;
+  gap: var(--h-space-2);
+}
+.helios-workspace-inline input {
+  flex: 1 1 auto;
+}
+.helios-workspace-inline button {
+  border: 1px solid var(--h-border-strong);
+  border-radius: var(--h-radius-sm);
+  background: var(--h-bg);
+  color: var(--h-text);
+  cursor: pointer;
+}
+.helios-workspace-inline button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.helios-workspace-locked,
+.helios-workspace-warning,
+.helios-workspace-error {
+  font-size: var(--h-fs-xs);
+}
+.helios-workspace-locked {
+  color: var(--h-text-muted);
+}
+.helios-workspace-warning {
+  color: var(--h-accent-ink);
+}
+.helios-workspace-error {
+  color: var(--h-error);
+}
+
 /* --- 侧边栏 --- */
 .helios-sidebar {
   display: flex;

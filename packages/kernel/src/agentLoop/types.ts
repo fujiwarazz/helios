@@ -8,17 +8,20 @@ import type {
   AskQuestionRequest,
   AskQuestionResponse,
   Runtime,
+  FileSystemPort,
 } from "@helios/ports";
 import type { ToolRegistry } from "../toolRegistry";
 import type { HookRunner } from "../hookRunner";
 import type { AgentEventEmitter } from "../events";
 import type { LlmRetryOptions } from "./retryBackoff";
+import type { ArtifactAction, FileEditObservation } from "../kernel";
 
 /** tool_use 内容块的类型别名，供 streamAssistant/executeTools 共用，避免重复 Extract<...>。 */
 export type ToolUseBlock = Extract<ContentBlock, { type: "tool_use" }>;
 
 /** 单个 turn 的持久化记录，Session（turns.jsonl）与 runTurnLoop 共用同一形状。 */
 export interface TurnRecord {
+  schemaVersion: 1;
   turnId: string;
   runIndex: number;
   turnIndex: number;
@@ -62,6 +65,9 @@ export interface RunLoopDeps {
    * warning（不触发压缩，纯观察）。不传则不检查，默认关闭。见 {@link ./contextBudget.ts}。
    */
   contextBudgetWarnTokens?: number;
+  fileSystem: FileSystemPort;
+  recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
+  markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
 }
 
 /**

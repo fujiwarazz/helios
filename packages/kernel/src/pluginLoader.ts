@@ -134,6 +134,7 @@ const PORT_META: Record<PortName, PortMeta> = {
 export interface LoadResult {
   capabilities: CapabilityProvider[];
   llm: LiveLLMRegistry;
+  disposables: Array<{ dispose(): void | Promise<void> }>;
 }
 
 /**
@@ -151,6 +152,7 @@ export async function loadPlugins(
   resolvePackage?: PackageResolver,
 ): Promise<LoadResult> {
   const capabilities: CapabilityProvider[] = [];
+  const disposables: Array<{ dispose(): void | Promise<void> }> = [];
   const llm = ctx.ports.llm as LiveLLMRegistry;
 
   for (const entry of manifest.plugins) {
@@ -166,6 +168,7 @@ export async function loadPlugins(
       const perEntryCtx: KernelContext = { ...ctx, options: entry.options };
       const impl = await mod.create(perEntryCtx);
       validateShape(entry.port, impl, meta.requiredMethods);
+      if (isDisposable(impl)) disposables.push(impl);
 
       if (meta.kind === "single") {
         if (services.has(meta.token!)) {
@@ -187,7 +190,20 @@ export async function loadPlugins(
     }
   }
 
-  return { capabilities, llm };
+  return { capabilities, llm, disposables };
+}
+
+function isDisposable(value: unknown): value is { dispose(): void | Promise<void> } {
+  const dispose =
+    typeof value === "object" && value !== null
+      ? (value as { dispose?: unknown }).dispose
+      : undefined;
+  return (
+    typeof dispose === "function" &&
+    // Some ports expose handle-scoped cleanup as dispose(handle). It is not a
+    // plugin lifecycle hook and must never be invoked without its resource.
+    dispose.length === 0
+  );
 }
 
 async function importPlugin(

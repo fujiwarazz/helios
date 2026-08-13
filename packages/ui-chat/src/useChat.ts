@@ -311,7 +311,7 @@ export interface UseChatResult {
   /** run 开始前的历史压缩阶段是否在进行中（同步阻塞：此时 sendMessage 尚未真正发起 LLM 请求）。 */
   isCompacting: boolean;
   connection: ConnectionState;
-  send: (text: string) => Promise<void>;
+  send: (text: string) => Promise<boolean>;
   /** 中断当前 run（Stop 按钮）。client 不支持则为 no-op。 */
   stop: () => Promise<void>;
   /** 回溯到某 turn（⟲ 从这里重新开始）。client 不支持则为 no-op。 */
@@ -387,9 +387,10 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
   const send = useCallback(
     async (text: string) => {
       const t = text.trim();
-      if (!t) return;
+      if (!t) return false;
       try {
         await client.sendMessage(t);
+        return true;
       } catch (err) {
         // sendMessage() 在 run 未优雅收尾前意外 throw（如非预期异常/连接中断/compact() 抛错——
         // kernel 侧 maybeCompact() 无 try/catch，只 emit 了 compact_start 就直接向上抛，
@@ -402,6 +403,7 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
           isCompacting: false,
           messages: appendErrorMessage(s.messages, `error-send-${Date.now()}`, message),
         }));
+        return false;
       }
     },
     [client],

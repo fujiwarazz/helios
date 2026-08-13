@@ -188,7 +188,7 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
 
     // Bug 3：LLM 流中途报错 → 优雅结束本 run（保证 agent_end 一定 emit、路径一致），不 throw。
     if (streamError) {
-      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      await tree.persistTurn({ schemaVersion: 1, turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
       events.emit({ type: "turn_end", turnId, toolResults: [] });
       runError = streamError;
       break;
@@ -207,12 +207,15 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         events,
         runtimes,
         runId,
+        fileSystem: deps.fileSystem,
+        recordEdit: deps.recordEdit,
+        markAuditGap: deps.markAuditGap,
       });
       tree.appendNode(toolResultMsg);
       turnMessages.push(toolResultMsg);
       // 采集下一轮路由信号：错误 / 解析失败 / 打转（同名同参连续），并累加工具使用次数。
       updateRouteSignals(routeState, toolUseBlocks, records, parseErrorIds);
-      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      await tree.persistTurn({ schemaVersion: 1, turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
       events.emit({ type: "turn_end", turnId, toolResults: records });
       turnIndex++;
       continue; // 下一个 turn，把工具结果喂回 LLM
@@ -225,13 +228,13 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
       tree.appendNode(injected);
       turnMessages.push(injected);
       pendingLeadMessages = [injected];
-      await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+      await tree.persistTurn({ schemaVersion: 1, turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
       events.emit({ type: "turn_end", turnId, toolResults: [] });
       turnIndex++;
       continue;
     }
 
-    await tree.persistTurn({ turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
+    await tree.persistTurn({ schemaVersion: 1, turnId, runIndex, turnIndex, checkpointRef, anchorNodeId, messages: turnMessages });
     events.emit({ type: "turn_end", turnId, toolResults: [] });
     break;
   }

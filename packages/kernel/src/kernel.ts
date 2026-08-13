@@ -32,6 +32,8 @@ const DEFAULT_SYSTEM =
 
 export interface KernelOptions {
   workDir: string;
+  /** Session 持久化目录；缺省保持 `<workDir>/.helios/sessions` 兼容行为。 */
+  sessionDataRoot?: string;
   manifest: Manifest;
   logger?: Logger;
   system?: string;
@@ -40,9 +42,13 @@ export interface KernelOptions {
   resolvePackage?: PackageResolver;
   /** 覆盖 hook 命令默认超时（毫秒），主要用于测试/宿主定制，不改变配置加载来源。 */
   hookCommandTimeoutMs?: number;
+  /** Disable unsafe built-in tools for constrained hosts (for example Workspace sessions). */
+  disabledBuiltinTools?: string[];
 }
 
 export interface CreateSessionOptions {
+  /** 平台层预生成的稳定 Session ID；普通嵌入方不传时仍由 Kernel 生成。 */
+  id?: string;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
   maxTurns?: number;
   /** LLM 调用重试策略覆盖；缺省用 DEFAULT_LLM_RETRY（issue #10）。 */
@@ -55,6 +61,14 @@ export interface CreateSessionOptions {
    * `agentLoop/contextBudget.ts`。
    */
   contextBudgetWarnTokens?: number;
+  /** 首次 run 在写入用户消息和执行工具前调用；用于原子提交平台 SessionRecord。 */
+  beforeFirstRun?: (text: string) => Promise<void>;
+  /** 平台持久化 run 生命周期；一次多-turn run 只产生一对 running/终态。 */
+  onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
+  recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
+  markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  acquireMutationLease?: (runId: string) => Promise<() => Promise<void>>;
+  rollbackPolicy?: "full" | "conversation-only";
 }
 
 export class Kernel {
@@ -65,7 +79,9 @@ export class Kernel {
   private readonly hooks: HookRunner;
   private readonly renderers = new Map<string, ToolRenderer>();
   private readonly ports = createLivePortRegistry(this.services, this.llm);
+  private readonly pluginDisposables: Array<{ dispose(): void | Promise<void> }> = [];
   private started = false;
+  private disposePromise: Promise<void> | undefined;
 
   constructor(private readonly opts: KernelOptions) {
     this.logger = opts.logger ?? consoleLogger();
@@ -83,13 +99,14 @@ export class Kernel {
       ports: this.ports,
     };
 
-    const { capabilities } = await loadPlugins(
+    const { capabilities, disposables } = await loadPlugins(
       this.opts.manifest,
       this.services,
       ctx,
       this.logger,
       this.opts.resolvePackage,
     );
+    this.pluginDisposables.push(...disposables);
 
     // 必须实现的 Port 校验
     if (this.llm.size === 0) {
@@ -128,7 +145,11 @@ export class Kernel {
     exemptPrefix: boolean,
   ): Promise<void> {
     await cap.activate(ctx);
-    this.tools.add(cap.name, cap.getTools?.() ?? [], exemptPrefix);
+    const tools = cap.getTools?.() ?? [];
+    const enabledTools = exemptPrefix
+      ? tools.filter((tool) => !this.opts.disabledBuiltinTools?.includes(tool.name))
+      : tools;
+    this.tools.add(cap.name, enabledTools, exemptPrefix);
     this.hooks.register(cap.getHookHandlers?.() ?? []);
     for (const r of cap.getRenderers?.() ?? []) {
       this.renderers.set(r.toolName, r);
@@ -136,7 +157,7 @@ export class Kernel {
   }
 
   createSession(opts: CreateSessionOptions): Session {
-    return this.newSession(uid("sess"), opts);
+    return this.newSession(opts.id ?? uid("sess"), opts);
   }
 
   /**
@@ -154,6 +175,10 @@ export class Kernel {
     return new Session({
       id,
       workDir: this.opts.workDir,
+      sessionDir: join(
+        this.opts.sessionDataRoot ?? join(this.opts.workDir, ".helios", "sessions"),
+        id,
+      ),
       ports: this.ports,
       tools: this.tools,
       hooks: this.hooks,
@@ -165,6 +190,12 @@ export class Kernel {
       llmRetry: opts.llmRetry,
       sleep: opts.sleep,
       contextBudgetWarnTokens: opts.contextBudgetWarnTokens,
+      beforeFirstRun: opts.beforeFirstRun,
+      onRunStateChange: opts.onRunStateChange,
+      recordEdit: opts.recordEdit,
+      markAuditGap: opts.markAuditGap,
+      acquireMutationLease: opts.acquireMutationLease,
+      rollbackPolicy: opts.rollbackPolicy,
     });
   }
 
@@ -181,7 +212,7 @@ export class Kernel {
    * 按 updatedAt 倒序；目录缺失或单条损坏时安全跳过。只读，不 resume。
    */
   async listSessions(): Promise<SessionMeta[]> {
-    const dir = join(this.opts.workDir, ".helios", "sessions");
+    const dir = this.opts.sessionDataRoot ?? join(this.opts.workDir, ".helios", "sessions");
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -191,7 +222,7 @@ export class Kernel {
     const metas: SessionMeta[] = [];
     for (const id of entries) {
       try {
-        const raw = await readFile(join(dir, id, "meta.json"), "utf8");
+        const raw = await readKernelMeta(dir, id);
         const meta = JSON.parse(raw) as SessionMeta;
         if (meta && typeof meta.id === "string") metas.push(meta);
       } catch {
@@ -220,6 +251,51 @@ export class Kernel {
       tools,
       enabled: true,
     }));
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposePromise = this.disposePlugins();
+    return this.disposePromise;
+  }
+
+  private async disposePlugins(): Promise<void> {
+    for (const disposable of [...this.pluginDisposables].reverse()) {
+      try {
+        await disposable.dispose();
+      } catch (error) {
+        this.logger.error(
+          `插件资源释放失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    this.pluginDisposables.length = 0;
+    this.started = false;
+  }
+}
+
+export interface FileEditObservation {
+  toolUseId: string;
+  path: string;
+  operation: "create" | "update" | "delete";
+  before?: string;
+  after?: string;
+}
+
+export interface ArtifactAction {
+  workspaceId: string;
+  rootId: string;
+  relativePath: string;
+  before?: string;
+  after?: string;
+}
+
+async function readKernelMeta(root: string, id: string): Promise<string> {
+  try {
+    return await readFile(join(root, id, "kernel-meta.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return await readFile(join(root, id, "meta.json"), "utf8");
   }
 }
 

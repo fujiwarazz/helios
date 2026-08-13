@@ -1,9 +1,13 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
-import { Kernel, type Manifest, type AgentEvent } from "@helios/kernel";
+import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
+import type { AgentEvent, Manifest } from "@helios/kernel";
 import type { AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
+import { CliUsageError, parseCliOptions } from "./options";
+import { openCliWorkspace, type CliWorkspaceRuntime } from "./workspaceRuntime";
 
 const DEFAULT_MANIFEST: Manifest = {
   plugins: [
@@ -13,95 +17,141 @@ const DEFAULT_MANIFEST: Manifest = {
 };
 
 async function loadManifest(workDir: string): Promise<Manifest> {
+  let manifest = DEFAULT_MANIFEST;
   try {
-    const raw = await readFile(resolve(workDir, "helios.config.json"), "utf8");
-    return JSON.parse(raw) as Manifest;
-  } catch {
-    return DEFAULT_MANIFEST;
+    manifest = JSON.parse(
+      await readFile(resolve(workDir, "helios.config.json"), "utf8"),
+    ) as Manifest;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+  return {
+    plugins: manifest.plugins.map((entry) => ({
+      ...entry,
+      package: resolvePluginPackage(entry.package, workDir),
+    })),
+  };
 }
 
-function parseFlag(argv: string[], flag: string): string | undefined {
-  const i = argv.indexOf(flag);
-  if (i >= 0 && argv[i + 1]) return argv[i + 1];
-  return undefined;
+function resolvePluginPackage(specifier: string, workDir: string): string {
+  if (isAbsolute(specifier)) return specifier;
+  if (specifier.startsWith(".")) return resolve(workDir, specifier);
+  return import.meta.resolve(specifier);
 }
 
 async function main(): Promise<void> {
+  const cli = parseCliOptions(process.argv.slice(2));
   const workDir = process.cwd();
   const manifest = await loadManifest(workDir);
-  const argv = process.argv.slice(2);
-  const oneShot = parseFlag(argv, "--message");
-  const resumeId = parseFlag(argv, "--resume");
+  const dataRoot = resolve(process.env.HELIOS_DATA_ROOT ?? join(homedir(), ".helios"));
+  const gitTimeoutMs = parsePositiveInteger(process.env.HELIOS_GIT_TIMEOUT_MS);
   const rl = createInterface({ input: stdin, output: stdout });
+  const abort = new AbortController();
+  let runtime: CliWorkspaceRuntime | undefined;
+  let stopping = false;
 
   const askQuestion = async (req: AskQuestionRequest): Promise<AskQuestionResponse> => {
     stdout.write(`\n${req.question}\n`);
-    (req.options ?? []).forEach((o, i) => {
-      stdout.write(`  ${i + 1}. ${o.label}${o.description ? ` - ${o.description}` : ""}\n`);
+    (req.options ?? []).forEach((option, index) => {
+      stdout.write(
+        `  ${index + 1}. ${option.label}${option.description ? ` - ${option.description}` : ""}\n`,
+      );
     });
-    const ans = await rl.question("> ");
-    const idx = Number(ans) - 1;
-    const picked = req.options?.[idx]?.label ?? ans.trim();
-    return { answers: [picked] };
+    const answer = await rl.question("> ");
+    const index = Number(answer) - 1;
+    return { answers: [req.options?.[index]?.label ?? answer.trim()] };
   };
 
-  const kernel = new Kernel({
-    workDir,
-    manifest,
-    llmOptions: { provider: "openai" },
-    // 裸包名从 CLI 自身依赖解析（manifest 里的 @helios/* 是 CLI 的 workspace 依赖）。
-    resolvePackage: (spec) => import.meta.resolve(spec),
-  });
-  await kernel.start();
-  stdout.write(`\nhelios CLI 就绪。工具：${kernel.listTools().join(", ")}\n`);
+  const stop = (): void => {
+    if (stopping) return;
+    stopping = true;
+    abort.abort();
+    runtime?.bound.session.cancel();
+    rl.close();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
 
-  const session = resumeId
-    ? await kernel.resumeSession(resumeId, { askQuestion })
-    : kernel.createSession({ askQuestion });
-  if (resumeId) {
-    stdout.write(`已 resume 会话 ${session.id}（历史消息 ${session.getHistory().length} 条）\n`);
-  } else {
-    stdout.write(`会话 id：${session.id}（下次可用 --resume ${session.id} 续聊）\n`);
-  }
-  session.on((ev: AgentEvent) => render(ev));
-
-  // 非交互 one-shot 模式：跑一轮 run 后退出（供脚本 / e2e 使用）
-  if (oneShot !== undefined) {
-    try {
-      await session.sendMessage(oneShot);
-      rl.close();
-      process.exit(0);
-    } catch (err) {
-      stdout.write(`\n[错误] ${err instanceof Error ? err.message : String(err)}\n`);
-      rl.close();
-      process.exit(1);
+  try {
+    runtime = await openCliWorkspace({
+      cli,
+      cwd: workDir,
+      dataRoot,
+      manifest,
+      askQuestion,
+      signal: abort.signal,
+      gitTimeoutMs,
+    });
+    const { bound } = runtime;
+    const strategy = bound.binding.roots[0]?.strategy ?? "direct";
+    stdout.write(
+      `\nhelios CLI 就绪。${bound.binding.mode === "code" ? "Code" : "Chat"} workspace：${bound.binding.workspaceId} (${strategy})\n`,
+    );
+    stdout.write(`工具：${bound.kernel.listTools().join(", ")}\n`);
+    if (cli.resume) {
+      stdout.write(
+        `已 resume 会话 ${bound.session.id}（历史消息 ${bound.session.getHistory().length} 条）\n`,
+      );
+    } else {
+      stdout.write(`会话 id：${bound.session.id}（下次可用 --resume ${bound.session.id} 续聊）\n`);
     }
-  }
+    bound.session.on((event: AgentEvent) => render(event));
 
-  stdout.write("输入消息开始对话，Ctrl+C 退出。\n\n");
-  while (true) {
-    const line = await rl.question("\nyou › ");
-    if (!line.trim()) continue;
-    try {
-      await session.sendMessage(line);
-    } catch (err) {
-      stdout.write(`\n[错误] ${err instanceof Error ? err.message : String(err)}\n`);
+    if (cli.message !== undefined) {
+      await bound.session.sendMessage(cli.message);
+      return;
     }
+
+    stdout.write("输入消息开始对话，Ctrl+C 退出。\n\n");
+    while (!stopping) {
+      let line: string;
+      try {
+        line = await rl.question("\nyou › ");
+      } catch (error) {
+        if (stopping) break;
+        throw error;
+      }
+      if (!line.trim()) continue;
+      try {
+        await bound.session.sendMessage(line);
+      } catch (error) {
+        stdout.write(`\n[错误] ${formatError(error)}\n`);
+      }
+    }
+  } finally {
+    process.removeListener("SIGINT", stop);
+    process.removeListener("SIGTERM", stop);
+    rl.close();
+    await runtime?.close();
   }
 }
 
-function render(ev: AgentEvent): void {
-  switch (ev.type) {
+function parsePositiveInteger(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new CliUsageError("HELIOS_GIT_TIMEOUT_MS must be a positive integer");
+  }
+  return parsed;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function render(event: AgentEvent): void {
+  switch (event.type) {
     case "message_start":
-      if (ev.role === "assistant") stdout.write("\nhelios › ");
+      if (event.role === "assistant") stdout.write("\nhelios › ");
       break;
     case "message_update":
-      if (ev.delta.type === "text-delta") stdout.write(ev.delta.text);
-      else if (ev.delta.type === "tool-call-start") stdout.write(`\n  ⚙ 调用工具 ${ev.delta.name} …`);
+      if (event.delta.type === "text-delta") stdout.write(event.delta.text);
+      else if (event.delta.type === "tool-call-start") {
+        stdout.write(`\n  ⚙ 调用工具 ${event.delta.name} …`);
+      }
       break;
     case "tool_execution_end":
-      stdout.write(ev.isError ? "  [失败]\n" : "  [完成]\n");
+      stdout.write(event.isError ? "  [失败]\n" : "  [完成]\n");
       break;
     case "agent_end":
       stdout.write("\n");
@@ -111,7 +161,15 @@ function render(ev: AgentEvent): void {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : undefined;
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    if (error instanceof CliUsageError) {
+      process.stderr.write(`helios: ${error.message}\n`);
+      process.exitCode = error.exitCode;
+      return;
+    }
+    process.stderr.write(`helios: ${formatError(error)}\n`);
+    process.exitCode = 1;
+  });
+}
