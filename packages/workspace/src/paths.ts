@@ -17,7 +17,11 @@ export class WorkspacePaths {
   }
 
   workspaceFile(workspaceId: string): string {
-    return join(this.dataRoot, "workspaces", `${assertId(workspaceId)}.json`);
+    return join(this.workspaceDir(), `${assertId(workspaceId)}.json`);
+  }
+
+  workspaceDir(): string {
+    return join(this.dataRoot, "workspaces");
   }
 
   managedRoot(workspaceId: string): string {
