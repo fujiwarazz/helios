@@ -241,6 +241,19 @@ function ManagedApp(): JSX.Element {
     refresh();
   };
 
+  const submitFailed = async (): Promise<void> => {
+    let committed = false;
+    if (rpc && connectedSessionId) {
+      try {
+        committed = (await listSessions(rpc)).some((session) => session.id === connectedSessionId);
+      } catch {
+        committed = false;
+      }
+    }
+    if (committed) return;
+    setComposer((current) => ({ ...current, locked: false }));
+  };
+
   const composerHeader = capabilities?.codeMode ? (
     <div className="helios-code-composer">
       <ModeSwitch mode={composer.mode} disabled={composer.locked} onChange={changeMode} />
@@ -298,6 +311,7 @@ function ManagedApp(): JSX.Element {
             canSubmit={canSubmit}
             onBeforeSubmit={beforeSubmit}
             onFirstSubmitted={firstSubmitted}
+            onSubmitFailed={submitFailed}
             rollbackMode="conversation-only"
           />
         ) : view === "ports" ? (

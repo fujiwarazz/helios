@@ -19,6 +19,7 @@ export interface ChatViewProps {
   canSubmit?: boolean;
   onBeforeSubmit?: (text: string) => void | Promise<void>;
   onFirstSubmitted?: () => void;
+  onSubmitFailed?: () => void | Promise<void>;
   rollbackMode?: "full" | "conversation-only";
 }
 
@@ -227,6 +228,7 @@ export function ChatView({
   canSubmit = true,
   onBeforeSubmit,
   onFirstSubmitted,
+  onSubmitFailed,
   rollbackMode = "full",
 }: ChatViewProps): JSX.Element {
   const {
@@ -254,7 +256,10 @@ export function ChatView({
     try {
       await onBeforeSubmit?.(t);
       const sent = await send(t);
-      if (!sent) return;
+      if (!sent) {
+        await onSubmitFailed?.();
+        return;
+      }
       setInput("");
       if (!firstSubmittedRef.current) {
         firstSubmittedRef.current = true;
@@ -263,6 +268,7 @@ export function ChatView({
     } catch {
       // The caller owns pre-submit error presentation. Keeping the input lets the
       // user correct the workspace selection or retry without retyping.
+      await onSubmitFailed?.();
     } finally {
       setIsSubmitting(false);
     }

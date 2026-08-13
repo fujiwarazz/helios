@@ -125,6 +125,22 @@ describe("ChatView", () => {
     expect(onFirstSubmitted).toHaveBeenCalledTimes(1);
   });
 
+  it("notifies the shell when sending fails so provisional workspace locks can be released", async () => {
+    const { client } = makeMockClient();
+    client.sendMessage = async () => {
+      throw new Error("first submit failed");
+    };
+    const onSubmitFailed = vi.fn();
+    render(<ChatView client={client} onSubmitFailed={onSubmitFailed} />);
+    const input = screen.getByTestId("chat-input") as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "retry me" } });
+    await act(async () => fireEvent.click(screen.getByTestId("send-button")));
+
+    expect(onSubmitFailed).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("retry me");
+  });
+
   it("输入并发送 → 调用 sendMessage", async () => {
     const { client, sent } = makeMockClient();
     render(<ChatView client={client} />);
