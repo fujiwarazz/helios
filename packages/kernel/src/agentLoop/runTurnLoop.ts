@@ -207,6 +207,9 @@ export async function runTurnLoop(params: RunTurnLoopParams): Promise<RunTurnLoo
         events,
         runtimes,
         runId,
+        fileSystem: deps.fileSystem,
+        recordEdit: deps.recordEdit,
+        markAuditGap: deps.markAuditGap,
       });
       tree.appendNode(toolResultMsg);
       turnMessages.push(toolResultMsg);

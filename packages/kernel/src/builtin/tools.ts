@@ -151,6 +151,9 @@ export function createWriteTool(fileSystem: FileSystemPort): Tool {
       properties: { file_path: { type: "string" }, content: { type: "string" } },
       required: ["file_path", "content"],
     },
+    fileMutations: (input) => [
+      { path: (input as { file_path: string }).file_path, operationHint: "write" },
+    ],
     async execute(input) {
       const { file_path, content } = input as { file_path: string; content: string };
       await fileSystem.writeFile(file_path, content);
@@ -173,6 +176,9 @@ export function createEditTool(fileSystem: FileSystemPort): Tool {
       },
       required: ["file_path", "old_string", "new_string"],
     },
+    fileMutations: (input) => [
+      { path: (input as { file_path: string }).file_path, operationHint: "edit" },
+    ],
     async execute(input) {
       const { file_path, old_string, new_string, replace_all } = input as {
         file_path: string;

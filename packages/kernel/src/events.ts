@@ -33,6 +33,16 @@ export type AgentEvent =
   | { type: "compact_start"; messageCount: number }
   | { type: "compact_end"; summaryLength: number; remaining: number }
   | { type: "rollback"; turnId: string; historyLength: number }
+  | {
+      type: "artifact_action";
+      action: "openDiff";
+      sessionId: string;
+      workspaceId: string;
+      rootId: string;
+      relativePath: string;
+      before?: string;
+      after?: string;
+    }
   | { type: "head_changed"; headId: string | null }
   | {
       type: "agent_end";

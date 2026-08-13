@@ -21,6 +21,9 @@ export interface ExecuteToolsParams {
   // --- Cost-aware Runtime（数组，元素粘合自已装配的 Port；空数组即等价关闭该能力）---
   runtimes: Runtime[];
   runId: string;
+  fileSystem: import("@helios/ports").FileSystemPort;
+  recordEdit?: import("./types").RunLoopDeps["recordEdit"];
+  markAuditGap?: import("./types").RunLoopDeps["markAuditGap"];
 }
 
 export interface ExecuteToolsResult {
@@ -43,6 +46,9 @@ interface ToolExecCtx {
   events: AgentEventEmitter;
   runtimes: Runtime[];
   runId: string;
+  fileSystem: import("@helios/ports").FileSystemPort;
+  recordEdit?: import("./types").RunLoopDeps["recordEdit"];
+  markAuditGap?: import("./types").RunLoopDeps["markAuditGap"];
 }
 
 /**
@@ -61,6 +67,9 @@ export async function executeTools(params: ExecuteToolsParams): Promise<ExecuteT
     events,
     runtimes: params.runtimes,
     runId: params.runId,
+    fileSystem: params.fileSystem,
+    recordEdit: params.recordEdit,
+    markAuditGap: params.markAuditGap,
   };
 
   const allParallel =
@@ -112,6 +121,7 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
   // （与改造前"cache-set 发生在 PostToolUse 之前"的时序完全一致）。
   let cacheKey: ToolCacheKey | undefined;
   let cacheWrite: { result: ToolResult; ttlMs?: number } | undefined;
+  let mutationSnapshots: Array<{ path: string; before?: string }> = [];
 
   const finish = async (): Promise<OneToolCallResult> => {
     events.emit({ type: "tool_execution_end", toolUseId: block.id, output, isError });
@@ -180,6 +190,7 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
     isError = !!cached.isError;
     cacheHit = true;
   } else {
+    mutationSnapshots = await captureBefore(tool, input, ctx);
     try {
       const res = await tool.execute(input, toolCtx);
       output = res.output;
@@ -202,5 +213,58 @@ async function runOneToolCall(block: ToolUseBlock, ctx: ToolExecCtx): Promise<On
   if (post.output !== undefined) output = post.output;
   if (post.block) isError = true;
 
+  if (executed && !isError && mutationSnapshots.length > 0) {
+    await recordMutations(block.id, mutationSnapshots, ctx);
+  }
+
   return finish();
+}
+
+async function captureBefore(
+  tool: Tool,
+  input: unknown,
+  ctx: ToolExecCtx,
+): Promise<Array<{ path: string; before?: string }>> {
+  const mutations = tool.fileMutations?.(input) ?? [];
+  return Promise.all(
+    mutations.map(async ({ path }) => ({
+      path,
+      before: (await ctx.fileSystem.exists(path)) ? await ctx.fileSystem.readFile(path) : undefined,
+    })),
+  );
+}
+
+async function recordMutations(
+  toolUseId: string,
+  mutations: Array<{ path: string; before?: string }>,
+  ctx: ToolExecCtx,
+): Promise<void> {
+  for (const mutation of mutations) {
+    const existsAfter = await ctx.fileSystem.exists(mutation.path);
+    const after = existsAfter ? await ctx.fileSystem.readFile(mutation.path) : undefined;
+    const operation = mutation.before === undefined ? "create" : after === undefined ? "delete" : "update";
+    try {
+      const artifact = await ctx.recordEdit?.({ toolUseId, path: mutation.path, operation, before: mutation.before, after });
+      if (artifact) {
+        ctx.events.emit({
+          type: "artifact_action",
+          action: "openDiff",
+          sessionId: ctx.sessionId,
+          ...artifact,
+          before: artifact.before ?? mutation.before,
+          after: artifact.after ?? after,
+        });
+      }
+    } catch (error) {
+      try {
+        await ctx.markAuditGap?.({
+          toolUseId,
+          reason: error instanceof Error ? error.message : String(error),
+          createdAt: Date.now(),
+        });
+      } catch {
+        // 审计失败绝不能反向改变已经成功的工具结果。
+      }
+    }
+  }
 }

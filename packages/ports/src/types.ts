@@ -102,6 +102,10 @@ export interface Tool {
    * tool_use 中有任一工具非 parallel，整批退化为顺序执行（详见 executeTools）。
    */
   executionMode?: "sequential" | "parallel";
+  fileMutations?: (input: unknown) => Array<{
+    path: string;
+    operationHint: "write" | "edit" | "delete";
+  }>;
   execute(input: unknown, ctx: ToolContext): Promise<ToolResult>;
   // --- ToolResultCache 元数据（opt-in，默认不缓存；见 docs/cost-optimization-layer.md §1.2）---
   /** 声明该工具结果可缓存。默认 undefined = 不缓存（安全优先）。 */

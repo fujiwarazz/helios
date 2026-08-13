@@ -40,6 +40,9 @@ export {
   type LocalRuntimeRegistryOptions,
   type RuntimeRegistry,
 } from "./runtimeRegistry";
+export { LocalEditRecordStore, type LocalEditRecordStoreOptions } from "./editRecordStore";
+export { fingerprintWorkspace } from "./workspaceFingerprint";
+export { LocalMutationCoordinator, type MutationRunContext } from "./mutationCoordinator";
 export type {
   CloneWorkspaceRequest,
   EditRecord,

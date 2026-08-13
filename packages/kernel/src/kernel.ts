@@ -63,6 +63,9 @@ export interface CreateSessionOptions {
   beforeFirstRun?: (text: string) => Promise<void>;
   /** 平台持久化 run 生命周期；一次多-turn run 只产生一对 running/终态。 */
   onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
+  recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
+  markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  rollbackPolicy?: "full" | "conversation-only";
 }
 
 export class Kernel {
@@ -182,6 +185,9 @@ export class Kernel {
       contextBudgetWarnTokens: opts.contextBudgetWarnTokens,
       beforeFirstRun: opts.beforeFirstRun,
       onRunStateChange: opts.onRunStateChange,
+      recordEdit: opts.recordEdit,
+      markAuditGap: opts.markAuditGap,
+      rollbackPolicy: opts.rollbackPolicy,
     });
   }
 
@@ -258,6 +264,22 @@ export class Kernel {
     this.pluginDisposables.length = 0;
     this.started = false;
   }
+}
+
+export interface FileEditObservation {
+  toolUseId: string;
+  path: string;
+  operation: "create" | "update" | "delete";
+  before?: string;
+  after?: string;
+}
+
+export interface ArtifactAction {
+  workspaceId: string;
+  rootId: string;
+  relativePath: string;
+  before?: string;
+  after?: string;
 }
 
 async function readKernelMeta(root: string, id: string): Promise<string> {

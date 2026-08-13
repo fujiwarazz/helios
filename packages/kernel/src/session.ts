@@ -18,6 +18,7 @@ import { snapCompactionCut, reconstructPath, type CompactionRecord } from "./mes
 import { runTurnLoop } from "./agentLoop/runTurnLoop";
 import type { TurnRecord } from "./agentLoop/types";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
+import type { ArtifactAction, FileEditObservation } from "./kernel";
 import { CostAwareRuntime } from "./agentLoop/costAwareRuntime";
 
 /** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
@@ -53,6 +54,9 @@ export interface SessionOptions {
   contextBudgetWarnTokens?: number;
   beforeFirstRun?: (text: string) => Promise<void>;
   onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
+  recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
+  markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
+  rollbackPolicy?: "full" | "conversation-only";
 }
 
 /** 会话元数据，落 `<sessionDir>/kernel-meta.json`，供兼容列表与 resume。 */
@@ -334,6 +338,9 @@ export class Session {
         llmRetry: this.opts.llmRetry,
         sleep: this.opts.sleep,
         contextBudgetWarnTokens: this.opts.contextBudgetWarnTokens,
+        fileSystem: ports.fileSystem,
+        recordEdit: this.opts.recordEdit,
+        markAuditGap: this.opts.markAuditGap,
       },
       tree: {
         appendNode: (msg) => this.appendNode(msg),
@@ -612,7 +619,9 @@ export class Session {
     if (idx < 0) throw new Error(`未找到 turn：${turnId}`);
     const target = this.turnLog[idx];
 
-    await this.opts.ports.checkpoint.restore(target.checkpointRef);
+    if ((this.opts.rollbackPolicy ?? "full") === "full") {
+      await this.opts.ports.checkpoint.restore(target.checkpointRef);
+    }
 
     // 把 HEAD 移到锚点（该 turn assistant 之前的节点）；不删节点、不删 turnLog 后续记录之外的树。
     this.moveHead(target.anchorNodeId);
