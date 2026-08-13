@@ -342,6 +342,9 @@ importers:
 
   packages/memory-fs:
     dependencies:
+      '@helios/fs-node':
+        specifier: workspace:*
+        version: link:../fs-node
       '@helios/ports':
         specifier: workspace:*
         version: link:../ports
@@ -439,9 +442,22 @@ importers:
 
   packages/workspace:
     dependencies:
+      '@helios/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@helios/ports':
+        specifier: workspace:*
+        version: link:../ports
       execa:
         specifier: ^9.5.2
         version: 9.6.1
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
+    devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
 
 packages:
 
@@ -1895,6 +1911,12 @@ packages:
   /@types/prop-types@15.7.15:
     resolution: {integrity: sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==}
 
+  /@types/proper-lockfile@4.1.4:
+    resolution: {integrity: sha512-uo2ABllncSqg9F1D4nugVl9v93RmjxF6LJzQLMLDdPaXCUIDPeOJ21Gbqi43xNKzBi/WQ0Q0dICqufzQbMjipQ==}
+    dependencies:
+      '@types/retry': 0.12.5
+    dev: true
+
   /@types/react-dom@18.3.7(@types/react@18.3.31):
     resolution: {integrity: sha512-MEe3UeoENYVFXzoXEWsvcpg6ZvlrFNlOQ7EOsvhI3CfAXwzPfO8Qwuxd40nepsYKqyyVQnTdEfv68q91yLcKrQ==}
     peerDependencies:
@@ -1913,6 +1935,10 @@ packages:
     resolution: {integrity: sha512-H/+L+UkTV33uf49PH5pCAUBVPNj2nDBXTN+qS1dOwyyg24l3CcicicCA7ca+HMvJBZcFgl5r8e+RR6elsb4Lyw==}
     dependencies:
       '@types/node': 20.19.43
+    dev: true
+
+  /@types/retry@0.12.5:
+    resolution: {integrity: sha1-8JD/S9jS5blA/ycKs5/Vyhg0oH4=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/@types/retry/download/@types/retry-0.12.5.tgz}
     dev: true
 
   /@types/unist@2.0.11:
@@ -3060,7 +3086,6 @@ packages:
 
   /graceful-fs@4.2.11:
     resolution: {integrity: sha1-QYPk6L8Iu24Fu7L30uDI9xLKQOM=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/graceful-fs/download/graceful-fs-4.2.11.tgz}
-    dev: true
 
   /has-flag@4.0.0:
     resolution: {integrity: sha1-lEdx/ZyByBJlxNaUGGDaBrtZR5s=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/has-flag/download/has-flag-4.0.0.tgz}
@@ -4315,6 +4340,14 @@ packages:
     engines: {node: '>=0.4.0'}
     dev: true
 
+  /proper-lockfile@4.1.2:
+    resolution: {integrity: sha1-yLneKvay8WAQZ/mOAaxmuqIjFB8=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/proper-lockfile/download/proper-lockfile-4.1.2.tgz}
+    dependencies:
+      graceful-fs: 4.2.11
+      retry: 0.12.0
+      signal-exit: 3.0.7
+    dev: false
+
   /property-information@7.2.0:
     resolution: {integrity: sha512-IAtzIB6sUiWaJYrX9smp3V46pBGbBeLFRGdh25kg1334VcBlD8HzhPeNIWQH9zhGmo2itIe25EHt9dQP7G5hmg==}
     dev: false
@@ -4517,6 +4550,11 @@ packages:
     dependencies:
       lowercase-keys: 2.0.0
     dev: true
+
+  /retry@0.12.0:
+    resolution: {integrity: sha1-G0KmJmoh8HQh0bC1S33BZ7AcATs=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/retry/download/retry-0.12.0.tgz}
+    engines: {node: '>= 4'}
+    dev: false
 
   /reusify@1.1.0:
     resolution: {integrity: sha1-D+E7lSLhRz9RtVjueW4I8R+bSJ8=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/reusify/download/reusify-1.1.0.tgz}
@@ -4750,6 +4788,10 @@ packages:
   /siginfo@2.0.0:
     resolution: {integrity: sha1-MudscLeXJOO7Vny51UPrhYzPrzA=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/siginfo/download/siginfo-2.0.0.tgz}
     dev: true
+
+  /signal-exit@3.0.7:
+    resolution: {integrity: sha1-qaF2f4r4QVURTqq9c/mSc8j1mtk=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/signal-exit/download/signal-exit-3.0.7.tgz}
+    dev: false
 
   /signal-exit@4.1.0:
     resolution: {integrity: sha1-lSGIwcvVRgcOLdIND0HArgUwywQ=, tarball: https://artifactory.devops.xiaohongshu.com/artifactory/api/npm/npm-public/signal-exit/download/signal-exit-4.1.0.tgz}

@@ -87,16 +87,20 @@ class NodeFileSystem implements FileSystemPort {
 
 export const apiVersion = FILESYSTEM_PORT_API_VERSION;
 
-export function create(ctx: KernelContext): FileSystemPort {
+export function createGuardedFileSystem(root: string): FileSystemPort {
   // 归一化 workDir 到真实路径（如 macOS /var → /private/var），
   // 使其与 readFile/realpath 解析出的目标路径同源，避免同一目录被误判越界。
-  let realWorkDir = ctx.workDir;
+  let realWorkDir = root;
   try {
-    realWorkDir = realpathSync(ctx.workDir);
+    realWorkDir = realpathSync(root);
   } catch {
     // workDir 尚不存在等：退回原值。
   }
   return new NodeFileSystem(realWorkDir);
+}
+
+export function create(ctx: KernelContext): FileSystemPort {
+  return createGuardedFileSystem(ctx.workDir);
 }
 
 export default { apiVersion, create };

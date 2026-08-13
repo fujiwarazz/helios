@@ -45,6 +45,8 @@ export interface KernelOptions {
 }
 
 export interface CreateSessionOptions {
+  /** 平台层预生成的稳定 Session ID；普通嵌入方不传时仍由 Kernel 生成。 */
+  id?: string;
   askQuestion(req: AskQuestionRequest): Promise<AskQuestionResponse>;
   maxTurns?: number;
   /** LLM 调用重试策略覆盖；缺省用 DEFAULT_LLM_RETRY（issue #10）。 */
@@ -71,7 +73,9 @@ export class Kernel {
   private readonly hooks: HookRunner;
   private readonly renderers = new Map<string, ToolRenderer>();
   private readonly ports = createLivePortRegistry(this.services, this.llm);
+  private readonly pluginDisposables: Array<{ dispose(): void | Promise<void> }> = [];
   private started = false;
+  private disposePromise: Promise<void> | undefined;
 
   constructor(private readonly opts: KernelOptions) {
     this.logger = opts.logger ?? consoleLogger();
@@ -89,13 +93,14 @@ export class Kernel {
       ports: this.ports,
     };
 
-    const { capabilities } = await loadPlugins(
+    const { capabilities, disposables } = await loadPlugins(
       this.opts.manifest,
       this.services,
       ctx,
       this.logger,
       this.opts.resolvePackage,
     );
+    this.pluginDisposables.push(...disposables);
 
     // 必须实现的 Port 校验
     if (this.llm.size === 0) {
@@ -142,7 +147,7 @@ export class Kernel {
   }
 
   createSession(opts: CreateSessionOptions): Session {
-    return this.newSession(uid("sess"), opts);
+    return this.newSession(opts.id ?? uid("sess"), opts);
   }
 
   /**
@@ -232,6 +237,26 @@ export class Kernel {
       tools,
       enabled: true,
     }));
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposePromise) return this.disposePromise;
+    this.disposePromise = this.disposePlugins();
+    return this.disposePromise;
+  }
+
+  private async disposePlugins(): Promise<void> {
+    for (const disposable of [...this.pluginDisposables].reverse()) {
+      try {
+        await disposable.dispose();
+      } catch (error) {
+        this.logger.error(
+          `插件资源释放失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    this.pluginDisposables.length = 0;
+    this.started = false;
   }
 }
 

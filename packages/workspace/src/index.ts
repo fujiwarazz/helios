@@ -31,6 +31,15 @@ export {
   LegacySessionMigrator,
   type LegacySessionMigratorOptions,
 } from "./legacySessionMigrator";
+export { WorkspaceMemoryStore } from "./memoryStore";
+export { LocalDataRootLease } from "./dataRootLease";
+export {
+  LocalRuntimeRegistry,
+  WorkspaceUnavailableError,
+  type BoundSession,
+  type LocalRuntimeRegistryOptions,
+  type RuntimeRegistry,
+} from "./runtimeRegistry";
 export type {
   CloneWorkspaceRequest,
   EditRecord,

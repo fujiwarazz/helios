@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@helios/fs-node": "workspace:*",
     "@helios/ports": "workspace:*"
   }
 }
