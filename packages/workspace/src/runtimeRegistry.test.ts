@@ -55,6 +55,7 @@ describe("LocalRuntimeRegistry", () => {
     const bound = await registry.createSession({ mode: "chat" }, { askQuestion: noAsk });
 
     expect(await sessions.list()).toEqual([]);
+    expect(bound.kernel.listTools()).not.toContain("Bash");
     expect(bound.binding.mode).toBe("chat");
     expect(bound.materialized.primaryDir).toBe(
       await realpath(paths.managedRoot(bound.binding.workspaceId)),
@@ -66,6 +67,36 @@ describe("LocalRuntimeRegistry", () => {
       meta: { title: "first message" },
       binding: { workspaceId: bound.binding.workspaceId },
     });
+  });
+
+  it("rejects launch payloads that disguise repository access as Chat", async () => {
+    const local = join(allowedRoot, "repo");
+    await mkdir(local);
+    const workspace = await repositories.importLocalDirectory(local);
+    const registry = createRegistry();
+
+    await expect(
+      registry.createSession(
+        { mode: "chat", workspaceId: workspace.id },
+        { askQuestion: noAsk },
+      ),
+    ).rejects.toThrow(/Chat.*workspace/i);
+  });
+
+  it("does not allow Code mode to bind a managed Chat workspace", async () => {
+    const workspace = await catalog.createManagedChat();
+    const registry = createRegistry();
+
+    await expect(
+      registry.createSession(
+        {
+          mode: "code",
+          workspaceId: workspace.id,
+          roots: [{ rootId: workspace.roots[0]!.id, strategy: "direct" }],
+        },
+        { askQuestion: noAsk },
+      ),
+    ).rejects.toThrow(/Code.*repository/i);
   });
 
   it("reuses direct runtimes and disposes the Kernel after the final release", async () => {

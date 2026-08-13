@@ -229,12 +229,18 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
   }
 
   private async resolveLaunchWorkspace(request: SessionLaunchRequest): Promise<Workspace> {
-    if (request.mode === "chat" && !request.workspaceId) {
+    if (request.mode === "chat") {
+      if (request.workspaceId || request.roots?.length) {
+        throw new Error("Chat mode cannot select an existing workspace or roots");
+      }
       return this.catalog.createManagedChat();
     }
     if (!request.workspaceId) throw new Error("Code mode requires a workspaceId");
     const workspace = await this.catalog.get(request.workspaceId);
     if (!workspace) throw new WorkspaceUnavailableError(`workspace ${request.workspaceId} does not exist`);
+    if (workspace.kind === "managed-chat") {
+      throw new Error("Code mode requires a repository workspace");
+    }
     return workspace;
   }
 
@@ -303,6 +309,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       sessionDataRoot: join(this.paths.dataRoot, "sessions"),
       manifest: runtimeManifest,
       logger: this.logger,
+      disabledBuiltinTools: ["Bash"],
     });
     await kernel.start();
     const runtime: RuntimeEntry = {

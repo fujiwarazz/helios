@@ -42,6 +42,8 @@ export interface KernelOptions {
   resolvePackage?: PackageResolver;
   /** 覆盖 hook 命令默认超时（毫秒），主要用于测试/宿主定制，不改变配置加载来源。 */
   hookCommandTimeoutMs?: number;
+  /** Disable unsafe built-in tools for constrained hosts (for example Workspace sessions). */
+  disabledBuiltinTools?: string[];
 }
 
 export interface CreateSessionOptions {
@@ -143,7 +145,11 @@ export class Kernel {
     exemptPrefix: boolean,
   ): Promise<void> {
     await cap.activate(ctx);
-    this.tools.add(cap.name, cap.getTools?.() ?? [], exemptPrefix);
+    const tools = cap.getTools?.() ?? [];
+    const enabledTools = exemptPrefix
+      ? tools.filter((tool) => !this.opts.disabledBuiltinTools?.includes(tool.name))
+      : tools;
+    this.tools.add(cap.name, enabledTools, exemptPrefix);
     this.hooks.register(cap.getHookHandlers?.() ?? []);
     for (const r of cap.getRenderers?.() ?? []) {
       this.renderers.set(r.toolName, r);
