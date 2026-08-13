@@ -121,6 +121,21 @@ describe("LocalRepositoryService", () => {
     await expect(catalog.get(cloned.id)).resolves.toEqual(cloned);
   });
 
+  it("uses a bounded default timeout when the consumer does not provide one", async () => {
+    const git = new FakeGitRunner();
+    const service = new LocalRepositoryService({
+      catalog,
+      paths,
+      allowedRoots: [],
+      git,
+      idFactory: fixedIds(),
+    });
+
+    await service.cloneRepository("https://github.com/org/repo.git");
+
+    expect(git.calls[0]?.options?.timeoutMs).toBe(120_000);
+  });
+
   it.each([
     "https://token@github.com/org/repo.git",
     "https://user:password@github.com/org/repo.git",

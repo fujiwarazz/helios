@@ -6,6 +6,8 @@ import type { WorkspaceCatalog } from "./catalog";
 import { WorkspacePaths } from "./paths";
 import type { Workspace } from "./types";
 
+const DEFAULT_GIT_TIMEOUT_MS = 120_000;
+
 export interface GitRunOptions {
   cwd?: string;
   signal?: AbortSignal;
@@ -113,7 +115,7 @@ export class LocalRepositoryService implements RepositoryService {
     try {
       await this.git.run(["clone", "--", remoteUrl, temporary], {
         signal: options.signal,
-        timeoutMs: options.timeoutMs,
+        timeoutMs: options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS,
       });
       const git = await this.inspectGit(temporary);
       if (!git) throw new Error("cloned repository is not a Git work tree");
