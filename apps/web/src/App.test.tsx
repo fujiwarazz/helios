@@ -4,7 +4,7 @@ import { act, render, fireEvent, screen } from "@testing-library/react";
 import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
 import type { IChatClient } from "@helios/ui-chat";
-import { App, launchForComposer } from "./App";
+import { App, launchForComposer, shouldShowModeComposer } from "./App";
 
 function mockClient(): { client: IChatClient; sent: string[] } {
   const sent: string[] = [];
@@ -35,6 +35,12 @@ describe("App", () => {
       workspaceId: "ws_1",
       roots: [{ rootId: "root_1", strategy: "direct" }],
     });
+  });
+
+  it("hides mode and workspace controls after a conversation is bound", () => {
+    expect(shouldShowModeComposer(true, { mode: "chat", locked: false }, undefined)).toBe(true);
+    expect(shouldShowModeComposer(true, { mode: "chat", locked: true }, undefined)).toBe(false);
+    expect(shouldShowModeComposer(true, { mode: "chat", locked: false }, "sess_1")).toBe(false);
   });
 
   it("注入 mock client 时渲染 ChatView 并能发送", async () => {

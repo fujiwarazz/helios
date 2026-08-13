@@ -30,7 +30,7 @@ import {
 
 const ACTIVE_SESSION_KEY = "helios.activeSessionId";
 
-type ComposerState =
+export type ComposerState =
   | { mode: "chat"; locked: boolean }
   | {
       mode: "code";
@@ -72,6 +72,14 @@ export function launchForComposer(state: ComposerState): SessionLaunchRequest {
     workspaceId: state.workspaceId,
     roots: [{ rootId: state.rootId, strategy: state.strategy }],
   };
+}
+
+export function shouldShowModeComposer(
+  codeModeEnabled: boolean,
+  state: ComposerState,
+  activeSessionId: string | undefined,
+): boolean {
+  return codeModeEnabled && !state.locked && activeSessionId === undefined;
 }
 
 function InjectedApp({ client }: { client: IChatClient }): JSX.Element {
@@ -243,7 +251,11 @@ function ManagedApp(): JSX.Element {
     setComposer((current) => ({ ...current, locked: false }));
   };
 
-  const composerHeader = capabilities?.codeMode ? (
+  const composerHeader = shouldShowModeComposer(
+    capabilities?.codeMode === true,
+    composer,
+    activeSessionId,
+  ) ? (
     <div className="helios-code-composer">
       <ModeSwitch mode={composer.mode} disabled={composer.locked} onChange={changeMode} />
       {composer.mode === "code" ? (
@@ -255,7 +267,7 @@ function ManagedApp(): JSX.Element {
             strategy: composer.strategy,
           }}
           locked={composer.locked}
-          localImportEnabled={capabilities.localImport}
+          localImportEnabled={capabilities?.localImport === true}
           onChange={changeWorkspace}
           onClone={async (remoteUrl) => {
             if (!rpc) return undefined;

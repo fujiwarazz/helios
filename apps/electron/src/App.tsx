@@ -29,7 +29,7 @@ import {
 
 const ACTIVE_SESSION_KEY = "helios.activeSessionId";
 
-type ComposerState =
+export type ComposerState =
   | { mode: "chat"; locked: boolean }
   | {
       mode: "code";
@@ -78,6 +78,14 @@ export function shouldResetFailedResume(
   activeSessionId: string | undefined,
 ): boolean {
   return connection === "closed" && activeSessionId !== undefined;
+}
+
+export function shouldShowModeComposer(
+  codeModeEnabled: boolean,
+  state: ComposerState,
+  activeSessionId: string | undefined,
+): boolean {
+  return codeModeEnabled && !state.locked && activeSessionId === undefined;
 }
 
 function InjectedApp({ client }: { client: IChatClient }): JSX.Element {
@@ -254,7 +262,11 @@ function ManagedApp(): JSX.Element {
     setComposer((current) => ({ ...current, locked: false }));
   };
 
-  const composerHeader = capabilities?.codeMode ? (
+  const composerHeader = shouldShowModeComposer(
+    capabilities?.codeMode === true,
+    composer,
+    activeSessionId,
+  ) ? (
     <div className="helios-code-composer">
       <ModeSwitch mode={composer.mode} disabled={composer.locked} onChange={changeMode} />
       {composer.mode === "code" ? (
