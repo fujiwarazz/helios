@@ -28,11 +28,6 @@ export {
   type LocalSessionCatalogOptions,
   type SessionCatalog,
 } from "./sessionCatalog";
-export {
-  AmbiguousLegacySessionError,
-  LegacySessionMigrator,
-  type LegacySessionMigratorOptions,
-} from "./legacySessionMigrator";
 export { WorkspaceMemoryStore } from "./memoryStore";
 export { LocalDataRootLease } from "./dataRootLease";
 export {

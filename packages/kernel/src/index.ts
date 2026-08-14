@@ -7,8 +7,18 @@ export type {
   CreateSessionOptions,
   PortInfo,
 } from "./kernel";
-export { Session } from "./session";
-export type { KernelSessionMeta, SessionOptions, SessionMeta } from "./session";
+export { Session, SessionBusyError } from "./session";
+export type { KernelSessionMeta, SessionOptions, SessionMeta, BranchInfo } from "./session";
+// 持久化 schema 校验/JSONL 解析的单一真源，供 @helios/workspace 复用（依赖方向 workspace → kernel）。
+export {
+  parseJsonLines,
+  assertSchemaVersion1,
+  isPlainObject,
+  UnsupportedSchemaVersionError,
+} from "./persistence/schema";
+export type { ParseJsonLinesOptions } from "./persistence/schema";
+export { replaySessionLog, SESSION_LOG_FILE } from "./persistence/sessionLog";
+export type { SessionLogEntry, ReplayResult } from "./persistence/sessionLog";
 export { ServiceCollection, createServiceToken } from "./serviceCollection";
 export type { ServiceToken } from "./serviceCollection";
 export {

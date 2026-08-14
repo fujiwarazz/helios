@@ -39,6 +39,14 @@ export interface Message {
    * （Session 内部会在 appendNode 时按当前 HEAD 补齐）。
    */
   parentId?: string | null;
+  /**
+   * 仅压缩摘要节点带此字段，其存在本身即「这是 summary 节点」的标记。
+   * summary 是树上的真实节点（parent = 压缩时的 HEAD），因此它在链上的位置天然
+   * 决定作用域：兄弟分支的祖先链里没有它，压缩不会误伤。
+   * `firstKeptId` = 保留 tail 的首节点 id（其及其之下保留，更早的被 summary 取代）；
+   * 全覆盖时为 null。缺省来源：普通消息本就没有压缩语义。
+   */
+  compaction?: { firstKeptId: string | null };
 }
 
 // ---------------------------------------------------------------------------

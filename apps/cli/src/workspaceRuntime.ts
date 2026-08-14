@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import type { CreateSessionOptions, Manifest } from "@helios/kernel";
 import {
-  LegacySessionMigrator,
   LocalDataRootLease,
   LocalEditRecordStore,
   LocalMutationCoordinator,
@@ -63,16 +62,10 @@ export async function openCliWorkspace(
     await registry.scavengeExpiredDrafts();
 
     if (options.cli.resume) {
+      // 旧格式（pre-Workspace 的裸 .helios/sessions/<id>）不再自动导入：其 turn 日志格式已不被
+      // kernel 支持，迁移过来也打不开。直接按"不存在"处理。
       if (!(await sessions.get(options.cli.resume))) {
-        const migrated = await new LegacySessionMigrator({
-          paths,
-          repositories,
-          sessions,
-          legacyRoots: [legacyRoot],
-        }).migrate(options.cli.resume);
-        if (!migrated) {
-          throw new Error(`session ${options.cli.resume} does not exist`);
-        }
+        throw new Error(`session ${options.cli.resume} does not exist`);
       }
       bound = await registry.resumeSession(options.cli.resume, {
         askQuestion: options.askQuestion,

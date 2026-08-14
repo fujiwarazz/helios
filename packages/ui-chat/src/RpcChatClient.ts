@@ -4,7 +4,7 @@
 // 连上后 call("sessionId") 解析 id → on(`session:<id>`) 转 onEvent。
 // ============================================================================
 
-import type { AgentEvent } from "@helios/kernel";
+import type { AgentEvent, BranchInfo } from "@helios/kernel";
 import type { Message } from "@helios/ports";
 import { RpcClient } from "@helios/protocol/browser";
 import type { ConnectionState } from "@helios/protocol/browser";
@@ -58,6 +58,15 @@ export class RpcChatClient implements IChatClient {
 
   async rollback(turnId: string): Promise<void> {
     await this.rpc.call("rollback", { turnId });
+  }
+
+  // 分支操作是纯内存 HEAD 移动 + 一行日志追加，不驱动 Agent，故用默认超时（与 rollback 同）。
+  async listBranches(): Promise<BranchInfo[]> {
+    return (await this.rpc.call("listBranches")) as BranchInfo[];
+  }
+
+  async switchBranch(leafId: string): Promise<void> {
+    await this.rpc.call("switchBranch", { leafId });
   }
 
   async cancel(): Promise<void> {

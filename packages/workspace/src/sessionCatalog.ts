@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, readdir, rm, rename } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { isPlainObject } from "@helios/kernel";
 import { WorkspacePaths } from "./paths";
 import type { SessionRecord, SessionState } from "./types";
 
@@ -193,17 +194,19 @@ function parseSessionRecord(raw: string, file: string, expectedId: string): Sess
 }
 
 function assertSessionRecord(value: unknown, file: string, expectedId: string): SessionRecord {
-  if (!isObject(value)) throw new SessionCatalogError("session must be an object", file);
+  if (!isPlainObject(value)) throw new SessionCatalogError("session must be an object", file);
+  // 这里刻意不用 kernel 的 assertSchemaVersion1：那条规则把「缺 schemaVersion」视为 1（为读取
+  // 早期无版本字段的日志留的口子），而 session.json 一律由本模块写出、必带版本，缺失即异常。
   if (value.schemaVersion !== 1) {
     throw new SessionCatalogError(
       `unsupported session schema version ${String(value.schemaVersion)}`,
       file,
     );
   }
-  if (!isObject(value.meta) || value.meta.id !== expectedId) {
+  if (!isPlainObject(value.meta) || value.meta.id !== expectedId) {
     throw new SessionCatalogError("session metadata id does not match its directory", file);
   }
-  if (!isObject(value.binding) || value.binding.sessionId !== expectedId) {
+  if (!isPlainObject(value.binding) || value.binding.sessionId !== expectedId) {
     throw new SessionCatalogError("session binding id does not match its directory", file);
   }
   if (!Array.isArray(value.binding.roots) || value.binding.roots.length === 0) {
@@ -225,8 +228,4 @@ function sameBinding(left: SessionRecord, right: SessionRecord): boolean {
 
 function isSessionState(value: unknown): value is SessionState {
   return value === "starting" || value === "running" || value === "idle" || value === "interrupted";
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

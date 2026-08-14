@@ -137,6 +137,9 @@ export function bindSession(
     displayHistory: () => session.getDisplayHistory(),
     sendMessage: (p) => session.sendMessage((p as { text: string }).text),
     rollback: (p) => session.rollback((p as { turnId: string }).turnId),
+    // 分支：回溯后旧分支不删，UI 需要能枚举并切回去
+    listBranches: () => session.listBranches(),
+    switchBranch: (p) => session.switchBranch((p as { leafId: string }).leafId),
     cancel: () => session.cancel(), // 让外部（UI/Stop 按钮）可真正触发中断
     // 交互式审批:前端回传答案解阻塞 AskUserQuestion 工具
     answerQuestion: (p) => approvals?.answer(p),
