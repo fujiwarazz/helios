@@ -26,6 +26,16 @@ describe("mapOpenAIStream", () => {
     ]);
   });
 
+  it("reads a gateway completed message when a stream chunk has no delta", async () => {
+    const events = await collect([
+      { choices: [{ message: { content: "你好" }, finish_reason: "stop" }] },
+    ]);
+    expect(events).toEqual([
+      { type: "text-delta", text: "你好" },
+      { type: "message-stop", stopReason: "end_turn" },
+    ]);
+  });
+
   it("splits a single tool call across index-based deltas", async () => {
     const events = await collect([
       {

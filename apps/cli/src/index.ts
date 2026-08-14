@@ -1,6 +1,7 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -44,7 +45,7 @@ function resolvePluginPackage(specifier: string, workDir: string): string {
 
 async function main(): Promise<void> {
   const cli = parseCliOptions(process.argv.slice(2));
-  const workDir = process.cwd();
+  const workDir = findManifestRoot(process.cwd());
   const manifest = await loadManifest(workDir);
   const dataRoot = resolve(process.env.HELIOS_DATA_ROOT ?? join(homedir(), ".helios"));
   const gitTimeoutMs = parsePositiveInteger(process.env.HELIOS_GIT_TIMEOUT_MS);
@@ -144,6 +145,18 @@ async function main(): Promise<void> {
     process.removeListener("SIGTERM", stop);
     rl?.close();
     await runtime?.close();
+  }
+}
+
+/** pnpm --filter runs this package from apps/cli; locate the user manifest above it. */
+function findManifestRoot(startDir: string): string {
+  const initialDir = resolve(startDir);
+  let candidate = initialDir;
+  while (true) {
+    if (existsSync(join(candidate, "helios.config.json"))) return candidate;
+    const parent = dirname(candidate);
+    if (parent === candidate) return initialDir;
+    candidate = parent;
   }
 }
 
