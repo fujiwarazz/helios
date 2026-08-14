@@ -450,19 +450,40 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     await client.cancel?.();
   }, [client]);
 
+  /**
+   * 把移动 HEAD 的操作（回溯/切分支）的失败显示出来。服务端在 run 进行中会拒绝
+   * （SessionBusyError）：UI 已在流式期间禁用入口，但绕过 UI（直连 RPC）或竞态仍会走到这里，
+   * 必须给出原因，不能变成 unhandled rejection 让用户以为"点了没反应"。
+   */
+  const runHeadOp = useCallback(async (tag: string, op: () => Promise<void>) => {
+    try {
+      await op();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setState((s) => ({
+        ...s,
+        messages: appendErrorMessage(s.messages, `error-${tag}-${Date.now()}`, message),
+      }));
+    }
+  }, []);
+
   const rollback = useCallback(
     async (turnId: string) => {
-      await client.rollback?.(turnId);
+      await runHeadOp("rollback", async () => {
+        await client.rollback?.(turnId);
+      });
     },
-    [client],
+    [client, runHeadOp],
   );
 
   const switchBranch = useCallback(
     async (leafId: string) => {
       // 不在这里改本地 state：后端会发 head_changed，由订阅侧统一重拉权威历史。
-      await client.switchBranch?.(leafId);
+      await runHeadOp("branch", async () => {
+        await client.switchBranch?.(leafId);
+      });
     },
-    [client],
+    [client, runHeadOp],
   );
 
   const answer = useCallback(

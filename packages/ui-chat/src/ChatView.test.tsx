@@ -308,6 +308,62 @@ describe("ChatView", () => {
     expect(switched).toEqual(["m_alt"]);
   });
 
+  it("流式生成期间分支按钮全部禁用（run 期间移动 HEAD 会把回复写到错误分支）", async () => {
+    const switched: string[] = [];
+    const { client, emit } = makeMockClient();
+    client.listBranches = async () => [
+      { leafId: "m_main", depth: 2, isCurrent: true, preview: "主线回复" },
+      { leafId: "m_alt", depth: 2, isCurrent: false, preview: "分支回复" },
+    ];
+    client.switchBranch = async (leafId) => {
+      switched.push(leafId);
+    };
+    render(<ChatView client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // 非当前分支此时可点
+    expect((screen.getAllByTestId("branch-chip")[1] as HTMLButtonElement).disabled).toBe(false);
+
+    // 进入流式
+    await act(async () => {
+      emit({ type: "agent_start", runId: "r1" });
+      emit({ type: "message_start", messageId: "m1", role: "assistant", turnId: "sess-0-0" });
+    });
+
+    const streamingChips = screen.getAllByTestId("branch-chip");
+    expect(streamingChips.every((c) => (c as HTMLButtonElement).disabled)).toBe(true);
+    expect(streamingChips[1].getAttribute("title")).toContain("先停止当前回复");
+    await act(async () => fireEvent.click(streamingChips[1]));
+    expect(switched).toEqual([]); // 点不动
+
+    // run 结束后恢复可点
+    await act(async () => {
+      emit({ type: "agent_end", runId: "r1", turnIds: ["sess-0-0"], newMessages: [] });
+    });
+    expect((screen.getAllByTestId("branch-chip")[1] as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("服务端拒绝切分支（run 进行中）时把原因显示出来，不是静默失败", async () => {
+    const { client } = makeMockClient();
+    client.listBranches = async () => [
+      { leafId: "m_main", depth: 2, isCurrent: true, preview: "主线回复" },
+      { leafId: "m_alt", depth: 2, isCurrent: false, preview: "分支回复" },
+    ];
+    // 模拟绕过 UI 禁用后撞上服务端 SessionBusyError（RPC 会把它变成 rejected promise）
+    client.switchBranch = async () => {
+      throw new Error("切换分支 在生成过程中不可用：请先停止当前回复");
+    };
+    render(<ChatView client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await act(async () => fireEvent.click(screen.getAllByTestId("branch-chip")[1]));
+
+    expect(screen.getByTestId("message-list").textContent).toContain("在生成过程中不可用");
+  });
+
   it("审批提问:单选点击即回传答案并清卡片", async () => {
     const { client, ask, answered } = makeMockClient();
     render(<ChatView client={client} />);

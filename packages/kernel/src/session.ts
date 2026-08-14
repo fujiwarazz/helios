@@ -33,6 +33,17 @@ import {
   type SessionLogEntry,
 } from "./persistence/sessionLog";
 
+/**
+ * run 进行中尝试移动 HEAD（切分支 / 回溯）时抛出。宿主可据此给出"先停止生成"的提示，
+ * 而不是把它当成未知错误。
+ */
+export class SessionBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionBusyError";
+  }
+}
+
 async function writeFileAtomic(file: string, content: string): Promise<void> {
   const temporary = `${file}.${uid("tmp")}`;
   try {
@@ -133,6 +144,11 @@ export class Session {
   private readonly runtimes: Runtime[];
   private firstRunPrepared = false;
   private runState: "running" | "idle" | "interrupted" | undefined;
+  /**
+   * 是否有 run 在飞行中。与对外汇报的 `runState` 分开：这个只服务一个不变量 ——
+   * run 期间禁止任何移动 HEAD 的操作（详见 assertIdle）。
+   */
+  private runInFlight = false;
 
   constructor(private readonly opts: SessionOptions) {
     this.id = opts.id;
@@ -204,6 +220,26 @@ export class Session {
     this.emit({ type: "head_changed", headId: nodeId });
   }
 
+  /**
+   * run 期间禁止移动 HEAD。
+   *
+   * 这不是保守起见，而是修一个真实的数据损坏：`sendMessage` 内部有大量 await（hook、压缩、
+   * LLM 流、工具执行），并发进来的切分支会改掉 `headId`，于是正在生成的 assistant 消息被
+   * `appendNode` 挂到**新分支**上 —— 它却是用旧分支上下文生成的，同一 turn 的 user/assistant
+   * 还会分裂到两条树链上。`rollback` 更甚：它在 run 进行中 `checkpoint.restore()` 会把工作区
+   * 文件整批换掉，正在跑的工具脚下被抽地毯。
+   *
+   * 选择"拒绝"而非"排队等 run 结束"：排队会让用户点了之后长时间毫无反应（run 可能几分钟），
+   * 且把冲突藏起来；拒绝是显式的，配合 UI 在流式期间禁用按钮，正常路径根本触发不到。
+   */
+  private assertIdle(operation: string): void {
+    if (this.runInFlight) {
+      throw new SessionBusyError(
+        `${operation} 在生成过程中不可用：请先停止当前回复（run 期间移动 HEAD 会把回复写到错误分支）`,
+      );
+    }
+  }
+
   getHistory(): Message[] {
     return this.pathToHead();
   }
@@ -223,6 +259,7 @@ export class Session {
    * HEAD 的"跳走"要落盘，否则 resume 后会回到日志末端而非用户选定的分支。
    */
   async fork(nodeId: string): Promise<void> {
+    this.assertIdle("切换分支");
     if (!this.nodes.has(nodeId)) throw new Error(`node 不存在: ${nodeId}`);
     this.moveHead(nodeId);
     await this.appendLog({ schemaVersion: 1, kind: "head", headId: nodeId, cause: "fork" });
@@ -276,7 +313,21 @@ export class Session {
   /** 发送一条用户消息，驱动一个完整 run（agent_start → 多 turn → agent_end）。 */
   async sendMessage(text: string): Promise<Message[]> {
     const { ports, hooks, logger } = this.opts;
+    // 同步置位（在任何 await 之前），使并发进来的 fork/switchBranch/rollback 必定看见"运行中"。
+    this.runInFlight = true;
+    try {
+      return await this.runSendMessage(text, ports, hooks, logger);
+    } finally {
+      this.runInFlight = false;
+    }
+  }
 
+  private async runSendMessage(
+    text: string,
+    ports: SessionOptions["ports"],
+    hooks: SessionOptions["hooks"],
+    logger: Logger,
+  ): Promise<Message[]> {
     // UserPromptSubmit：提交后、进入 LLM 前。可 block（不进入循环）/ 改写文本 / 追加上下文。
     const submitDecision = await hooks.runUserPromptSubmit({ sessionId: this.id, text });
     if (submitDecision.block) {
@@ -601,6 +652,7 @@ export class Session {
    * 无 CheckpointPort（noop）时文件不还原，仅移 HEAD——与降级约定一致。
    */
   async rollback(turnId: string): Promise<void> {
+    this.assertIdle("回溯");
     const idx = this.turnLog.findIndex((r) => r.turnId === turnId);
     if (idx < 0) throw new Error(`未找到 turn：${turnId}`);
     const target = this.turnLog[idx];

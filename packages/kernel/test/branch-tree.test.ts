@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Logger, AskQuestionRequest, AskQuestionResponse, Message } from "@helios/ports";
-import { Kernel, type Manifest } from "../src/index";
+import { Kernel, SessionBusyError, type Manifest } from "../src/index";
 import type { AgentEvent } from "../src/events";
 
 function fixture(name: string): string {
@@ -272,5 +272,60 @@ describe("消息树 —— 分支跨 resume 存活", () => {
     expect(previews).toHaveLength(2);
     expect(previews.some((p) => p.includes("走方案甲"))).toBe(true);
     expect(previews.some((p) => p.includes("走方案乙"))).toBe(true);
+  });
+});
+
+describe("消息树 —— run 进行中禁止移动 HEAD", () => {
+  /**
+   * 这是数据损坏防护，不是保守起见：sendMessage 内部有大量 await，并发切分支会改掉 headId，
+   * 于是正在生成的 assistant 消息被 appendNode 挂到新分支上（却是用旧分支上下文生成的），
+   * 同一 turn 的 user/assistant 还会分裂到两条树链。rollback 更甚（还会 restore 工作区文件）。
+   */
+  it("run 飞行中 fork/switchBranch/rollback 一律拒绝，且树不被分裂", async () => {
+    const kernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    await session.sendMessage("第一轮");
+    const branchPointId = session.getHistory().slice(-1)[0].id;
+
+    // 不 await：让 run 处于飞行中（runInFlight 在第一个 await 之前就同步置位）。
+    // 必须在 finally 里 await，否则断言失败会留下悬空 run，它随后会在被清理掉的 workDir 上写盘。
+    const running = session.sendMessage("第二轮");
+    try {
+      await expect(session.fork(branchPointId)).rejects.toThrow(SessionBusyError);
+      await expect(session.switchBranch(branchPointId)).rejects.toThrow(/生成过程中不可用/);
+      await expect(session.rollback(`${session.id}-0-0`)).rejects.toThrow(SessionBusyError);
+    } finally {
+      await running;
+    }
+
+    // 核心不变量：三次拒绝没有产生任何分支，本 run 的 user/assistant 仍在同一条链上。
+    expect(session.listBranches()).toHaveLength(1);
+    const display = session.getDisplayHistory();
+    expect(display.some((m) => textOf(m).includes("第二轮"))).toBe(true);
+    // 链式连续：每个非根节点的 parent 都是它在展示历史里的前一个节点
+    for (let i = 1; i < display.length; i++) {
+      expect(display[i].parentId).toBe(display[i - 1].id);
+    }
+
+    // run 结束后恢复可用
+    await session.fork(branchPointId);
+    expect(session.getHistory().slice(-1)[0].id).toBe(branchPointId);
+  });
+
+  it("run 被 cancel 打断后闸门也会复位，不会永久卡住切分支", async () => {
+    const kernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+    await session.sendMessage("第一轮");
+    const branchPointId = session.getHistory().slice(-1)[0].id;
+
+    const running = session.sendMessage("会被打断");
+    session.cancel();
+    await running;
+
+    // runInFlight 在 finally 里复位，不受 run 是否优雅收尾影响
+    await expect(session.fork(branchPointId)).resolves.toBeUndefined();
   });
 });

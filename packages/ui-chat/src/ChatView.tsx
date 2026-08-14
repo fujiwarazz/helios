@@ -244,14 +244,21 @@ function ApprovalCard({
 function BranchBar({
   branches,
   onSwitch,
+  disabled,
 }: {
   branches: BranchInfo[];
   onSwitch: (leafId: string) => void;
+  /** 流式生成期间禁用：run 期间移动 HEAD 会把回复写到错误分支（服务端同样会拒绝，这里只是不让用户撞上）。 */
+  disabled: boolean;
 }): JSX.Element {
   // 深度浅的分支通常更早产生，按深度排序让顺序稳定，避免 Map 迭代顺序造成按钮跳动。
   const sorted = [...branches].sort((a, b) => a.depth - b.depth);
   return (
-    <div data-testid="branch-bar" className="helios-branch-bar">
+    <div
+      data-testid="branch-bar"
+      className="helios-branch-bar"
+      data-disabled={disabled ? "true" : "false"}
+    >
       <span className="helios-branch-label">分支</span>
       {sorted.map((b, i) => (
         <button
@@ -261,8 +268,8 @@ function BranchBar({
           data-current={b.isCurrent ? "true" : "false"}
           className="helios-branch-chip"
           aria-current={b.isCurrent ? "true" : undefined}
-          title={b.preview || `分支 ${i + 1}`}
-          disabled={b.isCurrent}
+          title={disabled ? "生成中不能切换分支，请先停止当前回复" : b.preview || `分支 ${i + 1}`}
+          disabled={b.isCurrent || disabled}
           onClick={() => onSwitch(b.leafId)}
         >
           {i + 1}
@@ -372,7 +379,11 @@ export function ChatView({
 
       <div className="helios-composer">
         {canSwitchBranch && branches.length > 1 ? (
-          <BranchBar branches={branches} onSwitch={(leafId) => void switchBranch(leafId)} />
+          <BranchBar
+            branches={branches}
+            onSwitch={(leafId) => void switchBranch(leafId)}
+            disabled={isStreaming}
+          />
         ) : null}
         {composerHeader ? <div className="helios-composer-header">{composerHeader}</div> : null}
         <div className="helios-input-row">

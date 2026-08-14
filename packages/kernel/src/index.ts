@@ -7,7 +7,7 @@ export type {
   CreateSessionOptions,
   PortInfo,
 } from "./kernel";
-export { Session } from "./session";
+export { Session, SessionBusyError } from "./session";
 export type { KernelSessionMeta, SessionOptions, SessionMeta, BranchInfo } from "./session";
 // 持久化 schema 校验/JSONL 解析的单一真源，供 @helios/workspace 复用（依赖方向 workspace → kernel）。
 export {
