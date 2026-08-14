@@ -6,7 +6,10 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import type { AgentEvent, Manifest } from "@helios/kernel";
 import type { AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
+import { selectInteractiveMode } from "./interactiveMode";
 import { CliUsageError, parseCliOptions } from "./options";
+import { HeliosInteractiveView } from "./tui/heliosInteractiveView";
+import { InteractiveCli } from "./tui/interactiveCli";
 import { openCliWorkspace, type CliWorkspaceRuntime } from "./workspaceRuntime";
 
 const DEFAULT_MANIFEST: Manifest = {
@@ -45,12 +48,15 @@ async function main(): Promise<void> {
   const manifest = await loadManifest(workDir);
   const dataRoot = resolve(process.env.HELIOS_DATA_ROOT ?? join(homedir(), ".helios"));
   const gitTimeoutMs = parsePositiveInteger(process.env.HELIOS_GIT_TIMEOUT_MS);
-  const rl = createInterface({ input: stdin, output: stdout });
+  let rl: ReturnType<typeof createInterface> | undefined;
+  let interactive: InteractiveCli | undefined;
   const abort = new AbortController();
   let runtime: CliWorkspaceRuntime | undefined;
   let stopping = false;
 
   const askQuestion = async (req: AskQuestionRequest): Promise<AskQuestionResponse> => {
+    if (interactive) return interactive.askQuestion(req);
+    rl ??= createInterface({ input: stdin, output: stdout });
     stdout.write(`\n${req.question}\n`);
     (req.options ?? []).forEach((option, index) => {
       stdout.write(
@@ -67,7 +73,8 @@ async function main(): Promise<void> {
     stopping = true;
     abort.abort();
     runtime?.bound.session.cancel();
-    rl.close();
+    rl?.close();
+    void interactive?.stop();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -95,6 +102,19 @@ async function main(): Promise<void> {
     } else {
       stdout.write(`会话 id：${bound.session.id}（下次可用 --resume ${bound.session.id} 续聊）\n`);
     }
+    if (
+      selectInteractiveMode({
+        hasMessage: cli.message !== undefined,
+        stdinIsTTY: stdin.isTTY,
+        stdoutIsTTY: stdout.isTTY,
+      }) === "tui"
+    ) {
+      interactive = new InteractiveCli({ session: bound.session, view: new HeliosInteractiveView() });
+      await interactive.start();
+      await interactive.waitForExit();
+      return;
+    }
+
     bound.session.on((event: AgentEvent) => render(event));
 
     if (cli.message !== undefined) {
@@ -102,6 +122,7 @@ async function main(): Promise<void> {
       return;
     }
 
+    rl ??= createInterface({ input: stdin, output: stdout });
     stdout.write("输入消息开始对话，Ctrl+C 退出。\n\n");
     while (!stopping) {
       let line: string;
@@ -121,7 +142,7 @@ async function main(): Promise<void> {
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
-    rl.close();
+    rl?.close();
     await runtime?.close();
   }
 }

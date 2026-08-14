@@ -22,6 +22,7 @@
     "@helios/compact-default": "workspace:*",
     "@helios/teams-mailbox": "workspace:*",
     "@helios/capability-fs": "workspace:*",
-    "@helios/costmeter-default": "workspace:*"
+    "@helios/costmeter-default": "workspace:*",
+    "@helios/tui": "workspace:*"
   }
 }
