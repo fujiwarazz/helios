@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { mkdtemp, rm, readFile, access, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, readFile, access, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,7 +74,7 @@ describe("会话持久化 kernel-meta.json + resume", () => {
 
     const stateDir = join(sessionDataRoot, session.id);
     expect(await exists(join(stateDir, "kernel-meta.json"))).toBe(true);
-    expect(await exists(join(stateDir, "turns.jsonl"))).toBe(true);
+    expect(await exists(join(stateDir, "log.jsonl"))).toBe(true);
     expect(await exists(join(workDir, ".helios", "sessions", session.id))).toBe(false);
 
     const resumed = await newStartedKernel({ workDir, sessionDataRoot });
@@ -143,13 +143,16 @@ describe("会话持久化 kernel-meta.json + resume", () => {
 
     // 续聊：新 run 的 turnId 用续接后的 runIndex（=2），不与已有 turnId 冲突
     await s2.sendMessage("消息C");
-    const turnsPath = join(workDir, ".helios", "sessions", sid, "turns.jsonl");
-    const lines = (await readFile(turnsPath, "utf8")).split("\n").filter((l) => l.trim());
-    const parsed = lines.map((l) => JSON.parse(l) as { turnId: string; runIndex: number });
+    const logPath = join(workDir, ".helios", "sessions", sid, "log.jsonl");
+    const entries = (await readFile(logPath, "utf8"))
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as { kind: string; turnId?: string; runIndex?: number });
+    const turns = entries.filter((e) => e.kind === "turn");
     // run 索引应为 0、1、2 各一个 turn（mockLlmTextOnly 每 run 单 turn）
-    expect(parsed.map((p) => p.runIndex)).toEqual([0, 1, 2]);
+    expect(turns.map((t) => t.runIndex)).toEqual([0, 1, 2]);
     // turnId 全局唯一
-    expect(new Set(parsed.map((p) => p.turnId)).size).toBe(parsed.length);
+    expect(new Set(turns.map((t) => t.turnId)).size).toBe(turns.length);
   });
 
   it("resume 后 rollback 仍按重建后的历史正确截断", async () => {
@@ -171,56 +174,46 @@ describe("会话持久化 kernel-meta.json + resume", () => {
     expect(s2.getHistory().some((m) => textOf(m).includes("第二轮"))).toBe(false);
   });
 
-  it("读取 legacy v0 meta/turn 后在下一次持久化升级为 schemaVersion 1", async () => {
-    const firstKernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
-    await firstKernel.start();
-    const firstSession = firstKernel.createSession({ askQuestion: noAsk });
-    await firstSession.sendMessage("legacy message");
-    const directory = join(workDir, ".helios", "sessions", firstSession.id);
-
-    const meta = JSON.parse(await readFile(join(directory, "kernel-meta.json"), "utf8"));
-    delete meta.schemaVersion;
-    await writeFile(join(directory, "meta.json"), JSON.stringify(meta), "utf8");
-    await rm(join(directory, "kernel-meta.json"));
-    const legacyTurns = (await readFile(join(directory, "turns.jsonl"), "utf8"))
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => {
-        const row = JSON.parse(line);
-        delete row.schemaVersion;
-        return JSON.stringify(row);
-      })
-      .join("\n");
-    await writeFile(join(directory, "turns.jsonl"), `${legacyTurns}\n`, "utf8");
-
-    const secondKernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
-    await secondKernel.start();
-    const resumed = await secondKernel.resumeSession(firstSession.id, { askQuestion: noAsk });
-    await resumed.sendMessage("next message");
-
-    const upgradedRows = (await readFile(join(directory, "turns.jsonl"), "utf8"))
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-    expect(upgradedRows.map((row) => row.schemaVersion)).toEqual([1, 1]);
-    expect(JSON.parse(await readFile(join(directory, "kernel-meta.json"), "utf8")).schemaVersion).toBe(
-      1,
+  it("旧格式会话（只有 turns.jsonl，无 log.jsonl）resume 成空会话且不抛错，也不出现在列表里", async () => {
+    // 破坏性格式变更：不再兼容旧 turns.jsonl。旧目录与"未知 id"同等对待 —— 静默当空会话，
+    // 不 throw（throw 会让 UI 在打开历史会话时直接崩），也不列进 listSessions 免得用户点进空白。
+    const directory = join(sessionDataRoot, "sess_legacy");
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, "turns.jsonl"),
+      `${JSON.stringify({ schemaVersion: 1, turnId: "sess_legacy-0-0", runIndex: 0, turnIndex: 0, checkpointRef: { kind: "fs", value: "x" }, anchorNodeId: null, messages: [{ id: "m1", role: "user", content: "old" }] })}\n`,
+      "utf8",
     );
+    await writeFile(
+      join(directory, "kernel-meta.json"),
+      JSON.stringify({ schemaVersion: 1, id: "sess_legacy", title: "old", createdAt: 1, updatedAt: 1, lastRunIndex: 0, lastTurnIndex: 0 }),
+      "utf8",
+    );
+
+    const kernel = await newStartedKernel({ workDir, sessionDataRoot });
+    const resumed = await kernel.resumeSession("sess_legacy", { askQuestion: noAsk });
+    expect(resumed.getHistory()).toEqual([]);
+    expect((await kernel.listSessions()).map((m) => m.id)).not.toContain("sess_legacy");
   });
 
-  it("拒绝未知 turn schemaVersion", async () => {
+  it("拒绝未知的日志 schemaVersion", async () => {
     const firstKernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
     await firstKernel.start();
     const firstSession = firstKernel.createSession({ askQuestion: noAsk });
     await firstSession.sendMessage("future record");
-    const turns = join(workDir, ".helios", "sessions", firstSession.id, "turns.jsonl");
-    const row = JSON.parse((await readFile(turns, "utf8")).trim());
-    await writeFile(turns, `${JSON.stringify({ ...row, schemaVersion: 2 })}\n`, "utf8");
+    const logPath = join(workDir, ".helios", "sessions", firstSession.id, "log.jsonl");
+    const rows = (await readFile(logPath, "utf8"))
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    // 把最后一条改成来自"未来版本"：必须 fail loud，不能静默跳过后覆盖写丢数据
+    rows[rows.length - 1] = { ...rows[rows.length - 1], schemaVersion: 2 };
+    await writeFile(logPath, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
 
     const secondKernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
     await secondKernel.start();
     await expect(secondKernel.resumeSession(firstSession.id, { askQuestion: noAsk })).rejects.toThrow(
-      /unsupported turn schema version 2/i,
+      /unsupported session log schema version 2/i,
     );
   });
 

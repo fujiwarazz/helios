@@ -17,8 +17,9 @@ import { builtinCapabilityProvider } from "./builtin/provider";
 import { Session, type SessionMeta } from "./session";
 import { uid } from "./ids";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, access } from "node:fs/promises";
 import { join } from "node:path";
+import { SESSION_LOG_FILE } from "./persistence/sessionLog";
 import { createLangSmithTracer, type Tracer } from "@helios/observability-langsmith";
 
 /** 只读的 port/工具聚合信息，供 UI 的 Ports 页展示。 */
@@ -214,8 +215,8 @@ export class Kernel {
   }
 
   /**
-   * 列出磁盘上的历史会话（读每个 `.helios/sessions/<id>/meta.json`）。
-   * 按 updatedAt 倒序；目录缺失或单条损坏时安全跳过。只读，不 resume。
+   * 列出磁盘上的历史会话（读每个 `<sessionDataRoot>/<id>/kernel-meta.json`）。
+   * 按 updatedAt 倒序；目录缺失、单条损坏、或不是新格式（无 log.jsonl）时安全跳过。只读，不 resume。
    */
   async listSessions(): Promise<SessionMeta[]> {
     const dir = this.opts.sessionDataRoot ?? join(this.opts.workDir, ".helios", "sessions");
@@ -228,11 +229,14 @@ export class Kernel {
     const metas: SessionMeta[] = [];
     for (const id of entries) {
       try {
-        const raw = await readKernelMeta(dir, id);
+        // 只列得出「能被 resume 的」会话：旧格式（无 log.jsonl）resume 会得到空会话，
+        // 列出来只会让用户点进去看到空白，故与损坏条目同样跳过。
+        await access(join(dir, id, SESSION_LOG_FILE));
+        const raw = await readFile(join(dir, id, "kernel-meta.json"), "utf8");
         const meta = JSON.parse(raw) as SessionMeta;
         if (meta && typeof meta.id === "string") metas.push(meta);
       } catch {
-        // 无 meta.json / 损坏 / 非目录：跳过
+        // 无 log.jsonl / 无 kernel-meta.json / 损坏 / 非目录：跳过
       }
     }
     metas.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
@@ -294,15 +298,6 @@ export interface ArtifactAction {
   relativePath: string;
   before?: string;
   after?: string;
-}
-
-async function readKernelMeta(root: string, id: string): Promise<string> {
-  try {
-    return await readFile(join(root, id, "kernel-meta.json"), "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return await readFile(join(root, id, "meta.json"), "utf8");
-  }
 }
 
 function consoleLogger(): Logger {

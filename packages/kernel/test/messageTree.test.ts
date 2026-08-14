@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Message } from "@helios/ports";
-import { snapCompactionCut, reconstructPath, type CompactionRecord } from "../src/messageTree";
+import { snapCompactionCut, buildLlmPath } from "../src/messageTree";
 
 // 构造一条含 tool 对的路径：u1, a1(tool_use), tr1(toolResult), a2, u2
 function toolPath(): Message[] {
@@ -38,40 +38,65 @@ describe("snapCompactionCut —— Q1 不劈裂 tool 对", () => {
   });
 });
 
-describe("reconstructPath —— 按压缩记录重建有效路径", () => {
-  const chainHeadFirst = (): Message[] => [
+describe("buildLlmPath —— 按链上压缩节点重建有效路径", () => {
+  /**
+   * 物理链（head-first）：aMain ← uMain ← sum ← a1 ← u1
+   * 即：u1 → a1 上跑过一轮；压缩时 HEAD=a1，summary 挂在 a1 之下；之后追加 uMain → aMain。
+   * 保留 tail 是 summary 的**祖先**（a1 及其之下），这是 summary.parentId = 压缩时 HEAD
+   * 带来的性质 —— 若把 summary 挂到「最后一个被覆盖节点」，tail 会变成 summary 的兄弟
+   * 子树而脱离祖先链，整段丢失。
+   */
+  const chainWith = (firstKeptId: string | null): Message[] => [
     { id: "aMain", role: "assistant", content: "AMAIN", parentId: "uMain" },
-    { id: "uMain", role: "user", content: "UMAIN", parentId: "a1" },
+    { id: "uMain", role: "user", content: "UMAIN", parentId: "sum" },
+    {
+      id: "sum",
+      role: "user",
+      content: "<compacted_history>\nS\n</compacted_history>",
+      parentId: "a1",
+      compaction: { firstKeptId },
+    },
     { id: "a1", role: "assistant", content: "A1", parentId: "u1" },
     { id: "u1", role: "user", content: "U1", parentId: null },
   ];
-  const summary: Message = { id: "sum", role: "user", content: "<compacted_history>\nS\n</compacted_history>", parentId: "u1" };
-  const getNode = (id: string) => (id === "sum" ? summary : undefined);
 
-  it("firstPostId 在链上 → summary 取代被覆盖区间，firstKeptId 起保留", () => {
-    // 全覆盖 u1（firstKeptId=null），保留从 firstPostId=uMain 起
-    const rec: CompactionRecord = { firstPostId: "uMain", summaryId: "sum", firstKeptId: null };
-    const path = reconstructPath(chainHeadFirst(), [rec], getNode);
+  it("全覆盖（firstKeptId=null）→ 只留 summary + 压缩后新增", () => {
+    const path = buildLlmPath(chainWith(null));
     expect(path.map((m) => m.id)).toEqual(["sum", "uMain", "aMain"]);
-    // a1、u1 被覆盖，移出
-    expect(path.some((m) => m.id === "a1")).toBe(false);
+    expect(path.some((m) => m.id === "a1" || m.id === "u1")).toBe(false);
   });
 
-  it("部分覆盖：firstKeptId=a1 时保留 a1 及其下", () => {
-    const rec: CompactionRecord = { firstPostId: "uMain", summaryId: "sum", firstKeptId: "a1" };
-    const path = reconstructPath(chainHeadFirst(), [rec], getNode);
+  it("部分覆盖（firstKeptId=a1）→ 保留 a1，更早的 u1 被 summary 取代", () => {
+    const path = buildLlmPath(chainWith("a1"));
     expect(path.map((m) => m.id)).toEqual(["sum", "a1", "uMain", "aMain"]);
   });
 
-  it("firstPostId 不在链上（如兄弟分支）→ 记录不生效，返回完整链", () => {
-    const rec: CompactionRecord = { firstPostId: "uOther", summaryId: "sum", firstKeptId: null };
-    const path = reconstructPath(chainHeadFirst(), [rec], getNode);
-    expect(path.map((m) => m.id)).toEqual(["u1", "a1", "uMain", "aMain"]);
+  it("链上无压缩节点（如兄弟分支）→ 返回完整链的时间正序", () => {
+    const chain: Message[] = [
+      { id: "sib", role: "assistant", content: "SIB", parentId: "a1" },
+      { id: "a1", role: "assistant", content: "A1", parentId: "u1" },
+      { id: "u1", role: "user", content: "U1", parentId: null },
+    ];
+    expect(buildLlmPath(chain).map((m) => m.id)).toEqual(["u1", "a1", "sib"]);
   });
 
-  it("firstPostId 为 null（未回填）→ 记录不生效", () => {
-    const rec: CompactionRecord = { firstPostId: null, summaryId: "sum", firstKeptId: null };
-    const path = reconstructPath(chainHeadFirst(), [rec], getNode);
-    expect(path.map((m) => m.id)).toEqual(["u1", "a1", "uMain", "aMain"]);
+  it("压缩节点恰为 HEAD（压缩后尚未追加消息）→ 路径以 summary 起头", () => {
+    const chain = chainWith("a1").slice(2); // 去掉 uMain/aMain，sum 成为 HEAD
+    expect(buildLlmPath(chain).map((m) => m.id)).toEqual(["sum", "a1"]);
+  });
+
+  it("嵌套压缩：只取最靠近 HEAD 的压缩节点（旧 summary 文本已并入新 summary）", () => {
+    const chain: Message[] = [
+      { id: "u3", role: "user", content: "U3", parentId: "sum2" },
+      { id: "sum2", role: "user", content: "S2", parentId: "u2", compaction: { firstKeptId: "u2" } },
+      { id: "u2", role: "user", content: "U2", parentId: "sum1" },
+      { id: "sum1", role: "user", content: "S1", parentId: "u1", compaction: { firstKeptId: null } },
+      { id: "u1", role: "user", content: "U1", parentId: null },
+    ];
+    expect(buildLlmPath(chain).map((m) => m.id)).toEqual(["sum2", "u2", "u3"]);
+  });
+
+  it("空链返回空数组", () => {
+    expect(buildLlmPath([])).toEqual([]);
   });
 });

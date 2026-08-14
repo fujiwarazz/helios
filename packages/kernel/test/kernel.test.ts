@@ -77,10 +77,20 @@ describe("Kernel 集成 —— 纯文本 turn", () => {
     expect(assistant.content).toEqual([{ type: "text", text: "Hello world" }]);
 
     const jsonl = await readFile(
-      join(workDir, ".helios", "sessions", session.id, "turns.jsonl"),
+      join(workDir, ".helios", "sessions", session.id, "log.jsonl"),
       "utf8",
     );
-    expect(jsonl.trim().split("\n")).toHaveLength(1);
+    const entries = jsonl
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { kind: string; messageIds?: string[] });
+    // 断言不变量而非总行数（行数 = 消息数 + 1，是实现细节）：一个 run 一个 turn 条目，
+    // 且它引用的两条消息（user + assistant）都各有自己的 node 条目。
+    const turns = entries.filter((e) => e.kind === "turn");
+    expect(turns).toHaveLength(1);
+    expect(turns[0].messageIds).toHaveLength(2);
+    const nodeIds = new Set(entries.filter((e) => e.kind === "node").map((e) => (e as unknown as { message: Message }).message.id));
+    for (const id of turns[0].messageIds!) expect(nodeIds.has(id)).toBe(true);
   });
 
   it("rejects the run when turn history cannot be persisted", async () => {

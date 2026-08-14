@@ -133,8 +133,14 @@ async function runTurnLoopInternal(params: RunTurnLoopParams, trace: TraceRun): 
 
     const turnId = `${turnIdPrefix}-${turnIndex}`;
     turnIds.push(turnId);
-    // turn 前锚点 = 此刻 HEAD（本 turn assistant 之前的节点），供回溯定位。
-    const anchorNodeId = tree.currentHeadId();
+    // turn 前锚点 = 本 turn **首条消息之前**的节点，回溯到它即可让本 turn 全部消息离开路径。
+    // 首轮的 lead userMsg 已由 sendMessage 追加进树，故不能直接取 currentHeadId()（那会把
+    // userMsg 留在路径上，回溯后历史以 user 结尾，再发消息就出现两条连续 user 消息）。
+    // appendNode 必定赋 parentId（可为 null），因此 parentId !== undefined 即「已在树上」。
+    const anchorNodeId =
+      pendingLeadMessages[0]?.parentId !== undefined
+        ? pendingLeadMessages[0].parentId
+        : tree.currentHeadId();
     const checkpointRef = await tree.snapshotCheckpoint(turnId);
     events.emit({ type: "turn_start", turnId });
 

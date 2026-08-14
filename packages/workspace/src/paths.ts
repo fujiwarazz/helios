@@ -1,4 +1,5 @@
 import { join, resolve } from "node:path";
+import { SESSION_LOG_FILE } from "@helios/kernel";
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 
@@ -58,12 +59,9 @@ export class WorkspacePaths {
     return join(this.sessionDir(sessionId), "kernel-meta.json");
   }
 
-  turnLog(sessionId: string): string {
-    return join(this.sessionDir(sessionId), "turns.jsonl");
-  }
-
-  compactionLog(sessionId: string): string {
-    return join(this.sessionDir(sessionId), "compactions.jsonl");
+  /** kernel 的会话 append-only 日志（文件名真源在 @helios/kernel 的 SESSION_LOG_FILE）。 */
+  sessionLog(sessionId: string): string {
+    return join(this.sessionDir(sessionId), SESSION_LOG_FILE);
   }
 
   editLog(sessionId: string): string {
