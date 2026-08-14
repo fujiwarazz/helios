@@ -181,6 +181,27 @@ describe("ChatView", () => {
     expect(card.textContent).toContain("工具:Read");
   });
 
+  it("通用工具卡片默认折叠，展开后展示输入参数和输出", async () => {
+    const { client, emit } = makeMockClient();
+    render(<ChatView client={client} />);
+
+    await act(async () => {
+      emit({ type: "message_start", messageId: "m1", role: "assistant", turnId: "sess-0-0" });
+      emit({ type: "tool_execution_start", toolUseId: "u1", name: "Read", input: { path: "a.ts" } });
+      emit({ type: "tool_execution_end", toolUseId: "u1", output: "file contents", isError: false });
+    });
+
+    const card = screen.getByTestId("tool-card");
+    expect(card.textContent).not.toContain("输入参数");
+    await act(async () => {
+      fireEvent.click(card.querySelector("button")!);
+    });
+    expect(card.textContent).toContain("输入参数");
+    expect(card.textContent).toContain('"path": "a.ts"');
+    expect(card.textContent).toContain("输出内容");
+    expect(card.textContent).toContain("file contents");
+  });
+
   it("空态显示示例,点击填入输入框", async () => {
     const { client } = makeMockClient();
     render(<ChatView client={client} examplePrompts={["示例A"]} />);

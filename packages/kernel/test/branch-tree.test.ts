@@ -122,6 +122,8 @@ describe("compact-on-tree —— 部分覆盖不丢近端上下文", () => {
 
     // 被覆盖的 run1 user 移出路径
     expect(history.some((m) => textOf(m).includes("ALPHA_FIRST_USER"))).toBe(false);
+    // 展示历史不受 LLM 上下文压缩影响，仍保留真实消息链。
+    expect(session.getDisplayHistory().some((m) => textOf(m).includes("ALPHA_FIRST_USER"))).toBe(true);
     // summary 进入路径
     expect(history.some((m) => textOf(m).includes("COMPACTED_PARTIAL"))).toBe(true);
     // 未被覆盖的近端 tail（run1 assistant）仍在路径上，未被静默丢弃

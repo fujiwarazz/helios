@@ -24,7 +24,9 @@ export class RpcChatClient implements IChatClient {
   }
 
   async getHistory(): Promise<Message[]> {
-    return (await this.rpc.call("history")) as Message[];
+    // `history` 是给 LLM 的压缩上下文；聊天页必须请求完整的可见分支历史，
+    // 否则重连/刷新会把旧消息替换成 <compacted_history> 摘要。
+    return (await this.rpc.call("displayHistory")) as Message[];
   }
 
   async sendMessage(text: string): Promise<void> {

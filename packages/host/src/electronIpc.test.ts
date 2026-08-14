@@ -128,6 +128,9 @@ describe("@helios/host serveKernelOverElectronIpc —— 与 serveKernelOverWs �
     const history = (await rpc.call("history")) as Message[];
     expect(history.some((m) => m.role === "assistant")).toBe(true);
 
+    const displayHistory = (await rpc.call("displayHistory")) as Message[];
+    expect(displayHistory.some((m) => m.role === "assistant")).toBe(true);
+
     rpc.close();
     handle.dispose();
   });

@@ -3,7 +3,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { act, renderHook, cleanup } from "@testing-library/react";
 import type { AgentEvent } from "@helios/kernel";
 import type { Message } from "@helios/ports";
-import { useChat, reduce, initialState, type ChatState } from "./useChat";
+import { useChat, reduce, initialState, messagesToViews, type ChatState } from "./useChat";
 import type { IChatClient, ConnectionState } from "./types";
 
 afterEach(cleanup);
@@ -67,6 +67,10 @@ describe("useChat", () => {
 
     act(() => emit(toolEnd));
     expect(result.current.messages[0].tools[0].status).toBe("success");
+    expect(result.current.messages[0].tools[0]).toMatchObject({
+      input: { path: "a" },
+      output: "ok",
+    });
 
     act(() => emit(runEnd));
     expect(result.current.isStreaming).toBe(false);
@@ -174,6 +178,26 @@ describe("useChat", () => {
       await Promise.resolve();
     });
     expect(result.current.messages.map((m) => m.text)).toEqual(["hi", "hey"]);
+  });
+
+  it("从完整历史重建工具卡片时保留调用参数和输出", () => {
+    const views = messagesToViews([
+      {
+        id: "a1",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tool-1", name: "Read", input: { path: "a.ts" } }],
+      },
+      {
+        id: "r1",
+        role: "toolResult",
+        content: [{ type: "tool_result", toolUseId: "tool-1", output: "file contents", isError: false }],
+      },
+    ]);
+
+    expect(views[0].tools[0]).toMatchObject({
+      input: { path: "a.ts" },
+      output: "file contents",
+    });
   });
 
   it("client 切换(切会话/新建会话) → 清空上一个会话的残留消息,不与新会话历史混在一起", async () => {

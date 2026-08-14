@@ -222,6 +222,7 @@ export class RpcClient {
   /** 订阅连接状态变化。 */
   onState(cb: (s: ConnectionState) => void): Disposable {
     this.stateSubs.add(cb);
+    cb(this.state);
     return { dispose: () => this.stateSubs.delete(cb) };
   }
 

@@ -15,7 +15,7 @@ export type ConnectionState = "connecting" | "open" | "closed";
  * 实现可以是:RpcChatClient(跨进程,走 protocol) / 直接包 Session 的同进程适配器 / 测试 mock。
  */
 export interface IChatClient {
-  /** 拉取历史消息,用于挂载时重建视图。 */
+  /** 拉取当前分支的完整展示历史，用于挂载时重建视图；不得返回 LLM 压缩摘要。 */
   getHistory(): Promise<Message[]>;
   /** 发送一条用户消息,驱动一个 run。resolve 时机由实现决定(通常是 run 已受理,不等跑完)。 */
   sendMessage(text: string): Promise<void>;
@@ -51,6 +51,10 @@ export interface ToolCallView {
   id: string;
   name: string;
   status: ToolStatus;
+  /** 原始调用参数；默认工具卡片折叠展示，便于审计实际执行内容。 */
+  input?: unknown;
+  /** 原始工具返回；默认工具卡片折叠展示，包含错误输出。 */
+  output?: unknown;
   /** 来自 ToolRenderer 的结构化描述;无则 ChatView 走通用兜底。 */
   descriptor?: ToolRenderDescriptor;
 }

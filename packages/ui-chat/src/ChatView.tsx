@@ -29,10 +29,27 @@ const DEFAULT_EXAMPLES = [
   "这段逻辑是做什么的?",
 ];
 
+function formatToolValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** 通用审计详情：即使工具没有专属 renderer，也始终可以查看其实际入参与输出。 */
+function genericToolDetail(tool: ToolCallView): string | undefined {
+  const sections: string[] = [];
+  if (tool.input !== undefined) sections.push(`输入参数\n${formatToolValue(tool.input)}`);
+  if (tool.output !== undefined) sections.push(`输出内容\n${formatToolValue(tool.output)}`);
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
+}
+
 function ToolCard({ tool }: { tool: ToolCallView }): JSX.Element {
   const [open, setOpen] = useState(false);
   const label = tool.descriptor?.label ?? tool.name;
-  const detail = tool.descriptor?.detail;
+  const detail = [tool.descriptor?.detail, genericToolDetail(tool)].filter(Boolean).join("\n\n") || undefined;
   const expandable = !!detail;
   const statusDot =
     tool.status === "success" ? "●" : tool.status === "error" ? "✕" : "•";

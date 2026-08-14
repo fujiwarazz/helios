@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Transport } from "./transport";
 import { RpcServer } from "./server";
-import { RpcClient, RpcCallError } from "./client";
+import { RpcClient, RpcCallError, type ConnectionState } from "./client";
 
 /** 两个互联的内存 Transport(无网络):A.send → B.onMessage,反之亦然。 */
 function makeLoopbackPair(): { server: Transport; client: Transport } {
@@ -77,6 +77,18 @@ describe("RpcServer + RpcClient over loopback", () => {
       { payload: { n: 1 }, seq: 1 },
       { payload: { n: 2 }, seq: 2 },
     ]);
+    rpc.close();
+  });
+
+  it("onState 向晚订阅者立即回放当前连接状态", async () => {
+    const { client } = makeLoopbackPair();
+    const rpc = new RpcClient(() => client);
+    await Promise.resolve();
+
+    const states: ConnectionState[] = [];
+    rpc.onState((state) => states.push(state));
+
+    expect(states).toEqual(["open"]);
     rpc.close();
   });
 

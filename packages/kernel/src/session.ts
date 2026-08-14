@@ -211,6 +211,14 @@ export class Session {
     return this.pathToHead();
   }
 
+  /**
+   * 给人看的当前分支历史。压缩只替换 LLM 的上下文路径，绝不能删除或替换 UI 可见消息；
+   * 这里直接沿物理 parent 链还原，因而不会包含仅供模型使用的 summary 节点。
+   */
+  getDisplayHistory(): Message[] {
+    return [...this.ancestorChain(this.headId)].reverse();
+  }
+
   /** 回到某个历史节点继续对话：只移 HEAD，不删任何节点（旧子树保留，随时可切回）。 */
   fork(nodeId: string): void {
     if (!this.nodes.has(nodeId)) throw new Error(`node 不存在: ${nodeId}`);

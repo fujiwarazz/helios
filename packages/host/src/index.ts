@@ -134,6 +134,7 @@ export function bindSession(
   const server = new RpcServer(transport, {
     sessionId: () => session.id,
     history: () => session.getHistory(),
+    displayHistory: () => session.getDisplayHistory(),
     sendMessage: (p) => session.sendMessage((p as { text: string }).text),
     rollback: (p) => session.rollback((p as { turnId: string }).turnId),
     cancel: () => session.cancel(), // 让外部（UI/Stop 按钮）可真正触发中断

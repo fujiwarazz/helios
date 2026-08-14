@@ -139,6 +139,7 @@ export function reduce(
         id: event.toolUseId,
         name: event.name,
         status: "running",
+        input: event.input,
         descriptor,
       };
       const owner = lastAssistant(state.messages);
@@ -165,7 +166,7 @@ export function reduce(
       const hit = findTool(state.messages, event.toolUseId);
       if (hit) {
         // 服务端已算好 descriptor(该工具注册了 ToolRenderer)则直接用;否则走本地兜底。
-        const descriptor = event.descriptor ?? renderTool?.(hit.tool.name, undefined, status, event.output);
+        const descriptor = event.descriptor ?? renderTool?.(hit.tool.name, hit.tool.input, status, event.output);
         return {
           ...state,
           messages: state.messages.map((m) =>
@@ -173,7 +174,7 @@ export function reduce(
               ? {
                   ...m,
                   tools: m.tools.map((t) =>
-                    t.id === event.toolUseId ? { ...t, status, descriptor } : t,
+                    t.id === event.toolUseId ? { ...t, status, output: event.output, descriptor } : t,
                   ),
                 }
               : m,
@@ -182,7 +183,7 @@ export function reduce(
       }
       // 容忍乱序:end 早于 start → 预建一张已完成卡片挂到最后 assistant。
       const descriptor = event.descriptor ?? renderTool?.("", undefined, status, event.output);
-      const card: ToolCallView = { id: event.toolUseId, name: "", status, descriptor };
+      const card: ToolCallView = { id: event.toolUseId, name: "", status, output: event.output, descriptor };
       const owner = lastAssistant(state.messages);
       if (owner) {
         return {
@@ -248,7 +249,8 @@ export function messagesToViews(
         if (hit) {
           const status: ToolStatus = block.isError ? "error" : "success";
           hit.tool.status = status;
-          hit.tool.descriptor = renderTool?.(hit.tool.name, undefined, status, block.output);
+          hit.tool.output = block.output;
+          hit.tool.descriptor = renderTool?.(hit.tool.name, hit.tool.input, status, block.output);
         }
       }
       continue;
@@ -264,6 +266,7 @@ export function messagesToViews(
           id: block.id,
           name: block.name,
           status: "success",
+          input: block.input,
           descriptor: renderTool?.(block.name, block.input, "success"),
         });
       }

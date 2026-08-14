@@ -7,6 +7,9 @@ import { resolve } from "node:path";
 // 避免与 apps/web 的 5173 冲突(两个 app 可能同时开着对照调试)。
 export default defineConfig({
   root: __dirname,
+  // 生产 renderer 通过 BrowserWindow.loadFile() 打开。使用相对资源 URL，避免 `/assets/*`
+  // 被解析为 file:///assets/* 而使脚本和样式均加载失败、窗口只剩白屏。
+  base: "./",
   server: { port: 5174, strictPort: true },
   plugins: [react()],
   resolve: {
