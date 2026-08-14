@@ -5,7 +5,7 @@
 // ============================================================================
 
 import { useCallback, useEffect, useState } from "react";
-import type { AgentEvent } from "@helios/kernel";
+import type { AgentEvent, BranchInfo } from "@helios/kernel";
 import type {
   Message,
   ContentBlock,
@@ -319,10 +319,16 @@ export interface UseChatResult {
   stop: () => Promise<void>;
   /** 回溯到某 turn（⟲ 从这里重新开始）。client 不支持则为 no-op。 */
   rollback: (turnId: string) => Promise<void>;
+  /** 会话内的分支叶子（含当前分支标记与预览文本）。client 不支持时恒为空数组。 */
+  branches: BranchInfo[];
+  /** 切换到某条分支。client 不支持则为 no-op。 */
+  switchBranch: (leafId: string) => Promise<void>;
   /** client 是否支持 stop（据此显隐 Stop 按钮）。 */
   canStop: boolean;
   /** client 是否支持 rollback（据此显隐回溯入口）。 */
   canRollback: boolean;
+  /** client 是否支持切分支（据此显隐分支条）。 */
+  canSwitchBranch: boolean;
   /** 当前挂起的审批提问(AskUserQuestion);null 表示无。 */
   pendingQuestion: AskQuestion | null;
   /** 回传审批答案，解阻塞对应工具并清空卡片。 */
@@ -335,6 +341,8 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
   const [connection, setConnection] = useState<ConnectionState>("open");
   // 当前挂起的审批提问(AskUserQuestion);null 表示无。答复后清空。
   const [pendingQuestion, setPendingQuestion] = useState<AskQuestion | null>(null);
+  // 会话内的分支叶子。回溯/切分支后 HEAD 变化即重新拉取。
+  const [branches, setBranches] = useState<BranchInfo[]>([]);
 
   /**
    * 从后端权威历史重建视图。
@@ -362,17 +370,43 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     [client, renderTool],
   );
 
+  /** 拉取分支列表。后端不支持（listBranches 未实现）时置空，UI 自然不渲染分支条。 */
+  const refreshBranches = useCallback(
+    (aliveRef: { alive: boolean }) => {
+      if (typeof client.listBranches !== "function") return;
+      void client
+        .listBranches()
+        .then((list) => {
+          if (aliveRef.alive) setBranches(list);
+        })
+        .catch(() => {
+          /* 与 getHistory 同：重连/断线瞬间失败忽略，下次 HEAD 变化会再拉。 */
+        });
+    },
+    [client],
+  );
+
   useEffect(() => {
     const aliveRef = { alive: true };
     // client 变化 = 真实切会话/新建会话（reconnect 由 RpcClient 内部处理，不会走到这里、
     // 不会换 client 引用）：先清空上一个会话的残留消息/流式态，避免新会话的消息列表里
     // 还拖着上一个会话的内容，让人以为"切换没有效果"。
     setState(initialState);
+    setBranches([]);
     mergeHistory(aliveRef);
+    refreshBranches(aliveRef);
     const offEvent = client.onEvent((e) => {
       setState((prev) => reduce(prev, e, renderTool));
       // rollback：后端已移 HEAD，重新拉取权威历史并整体替换（被移除的消息随之消失）。
       if (e.type === "rollback") mergeHistory(aliveRef, "replace");
+      // head_changed：切分支/fork。同样必须整体替换 —— 换分支会让整条消息链变成另一条，
+      // reducer 无从局部打补丁。rollback 也会连带发这个事件，重复拉一次历史无副作用。
+      if (e.type === "head_changed") {
+        mergeHistory(aliveRef, "replace");
+        refreshBranches(aliveRef);
+      }
+      // 新消息落盘会产生新叶子（旧叶子不再是叶子），分支列表需随之更新。
+      if (e.type === "agent_end") refreshBranches(aliveRef);
     });
     const offState = client.onState?.((s) => setConnection(s));
     const offAsk = client.onAsk?.((q) => setPendingQuestion(q));
@@ -423,6 +457,14 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     [client],
   );
 
+  const switchBranch = useCallback(
+    async (leafId: string) => {
+      // 不在这里改本地 state：后端会发 head_changed，由订阅侧统一重拉权威历史。
+      await client.switchBranch?.(leafId);
+    },
+    [client],
+  );
+
   const answer = useCallback(
     async (questionId: string, answers: string[]) => {
       setPendingQuestion((cur) => (cur?.questionId === questionId ? null : cur));
@@ -439,8 +481,11 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
     send,
     stop,
     rollback,
+    branches,
+    switchBranch,
     canStop: typeof client.cancel === "function",
     canRollback: typeof client.rollback === "function",
+    canSwitchBranch: typeof client.switchBranch === "function",
     pendingQuestion,
     answer,
   };

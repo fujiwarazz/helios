@@ -230,6 +230,81 @@ describe("useChat", () => {
   });
 });
 
+describe("useChat —— 分支切换", () => {
+  /** 带分支能力的 mock：切分支后换一套历史，并像后端一样发 head_changed。 */
+  function makeBranchClient(): {
+    client: IChatClient;
+    emit: (e: AgentEvent) => void;
+    switched: string[];
+  } {
+    const eventCbs = new Set<(e: AgentEvent) => void>();
+    const switched: string[] = [];
+    const histories: Record<string, Message[]> = {
+      main: [{ id: "m_main", role: "assistant", content: "主线回复" }],
+      alt: [{ id: "m_alt", role: "assistant", content: "分支回复" }],
+    };
+    let current = "main";
+    const client: IChatClient = {
+      getHistory: async () => histories[current],
+      sendMessage: async () => undefined,
+      onEvent: (cb) => (eventCbs.add(cb), () => eventCbs.delete(cb)),
+      listBranches: async () => [
+        { leafId: "m_main", depth: 2, isCurrent: current === "main", preview: "主线回复" },
+        { leafId: "m_alt", depth: 2, isCurrent: current === "alt", preview: "分支回复" },
+      ],
+      switchBranch: async (leafId) => {
+        switched.push(leafId);
+        current = leafId === "m_alt" ? "alt" : "main";
+        eventCbs.forEach((cb) => cb({ type: "head_changed", headId: leafId }));
+      },
+    };
+    return { client, emit: (e) => eventCbs.forEach((cb) => cb(e)), switched };
+  }
+
+  it("挂载即拉取分支列表，canSwitchBranch 反映 client 能力", async () => {
+    const { client } = makeBranchClient();
+    const { result } = renderHook(() => useChat(client));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.canSwitchBranch).toBe(true);
+    expect(result.current.branches.map((b) => b.leafId)).toEqual(["m_main", "m_alt"]);
+    expect(result.current.branches.find((b) => b.isCurrent)?.leafId).toBe("m_main");
+  });
+
+  it("head_changed 触发整体替换历史（旧分支消息不残留）并刷新分支列表", async () => {
+    const { client, switched } = makeBranchClient();
+    const { result } = renderHook(() => useChat(client));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.messages.map((m) => m.text)).toEqual(["主线回复"]);
+
+    await act(async () => {
+      await result.current.switchBranch("m_alt");
+      await Promise.resolve();
+    });
+
+    expect(switched).toEqual(["m_alt"]);
+    // "replace" 模式：主线消息必须消失，而不是与分支消息拼在一起
+    expect(result.current.messages.map((m) => m.text)).toEqual(["分支回复"]);
+    expect(result.current.branches.find((b) => b.isCurrent)?.leafId).toBe("m_alt");
+  });
+
+  it("client 不支持分支时 canSwitchBranch 为 false 且 branches 为空（switchBranch 是 no-op）", async () => {
+    const { client } = makeMockClient([]);
+    const { result } = renderHook(() => useChat(client));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.canSwitchBranch).toBe(false);
+    expect(result.current.branches).toEqual([]);
+    await act(async () => {
+      await result.current.switchBranch("whatever");
+    });
+  });
+});
+
 describe("reduce —— 幂等 / 容忍乱序 / 重复", () => {
   function apply(events: AgentEvent[]): ChatState {
     return events.reduce((s, e) => reduce(s, e), initialState);

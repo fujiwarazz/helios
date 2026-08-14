@@ -268,6 +268,46 @@ describe("ChatView", () => {
     }
   });
 
+  it("单分支时不渲染分支条（避免给只有一条线性对话的用户增加噪音）", async () => {
+    const { client } = makeMockClient();
+    client.listBranches = async () => [
+      { leafId: "m_main", depth: 2, isCurrent: true, preview: "主线" },
+    ];
+    client.switchBranch = async () => undefined;
+    render(<ChatView client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("branch-bar")).toBeNull();
+  });
+
+  it("多分支时渲染分支条，点非当前分支触发 switchBranch；当前分支不可点", async () => {
+    const switched: string[] = [];
+    const { client } = makeMockClient();
+    client.listBranches = async () => [
+      { leafId: "m_main", depth: 2, isCurrent: true, preview: "主线回复" },
+      { leafId: "m_alt", depth: 2, isCurrent: false, preview: "分支回复" },
+    ];
+    client.switchBranch = async (leafId) => {
+      switched.push(leafId);
+    };
+    render(<ChatView client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const chips = screen.getAllByTestId("branch-chip");
+    expect(chips).toHaveLength(2);
+    // 当前分支高亮且禁用（切到自己无意义）
+    expect(chips[0].getAttribute("data-current")).toBe("true");
+    expect((chips[0] as HTMLButtonElement).disabled).toBe(true);
+    // 预览文本让用户能分辨各分支，而不是只看到一串 id
+    expect(chips[1].textContent).toContain("分支回复");
+
+    await act(async () => fireEvent.click(chips[1]));
+    expect(switched).toEqual(["m_alt"]);
+  });
+
   it("审批提问:单选点击即回传答案并清卡片", async () => {
     const { client, ask, answered } = makeMockClient();
     render(<ChatView client={client} />);

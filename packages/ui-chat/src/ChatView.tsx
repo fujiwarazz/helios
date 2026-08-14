@@ -5,6 +5,7 @@
 // ============================================================================
 
 import { useRef, useState, type ReactNode } from "react";
+import type { BranchInfo } from "@helios/kernel";
 import type { RenderTool } from "./useChat";
 import { useChat } from "./useChat";
 import { Markdown } from "./Markdown";
@@ -236,6 +237,42 @@ function ApprovalCard({
   );
 }
 
+/**
+ * 分支条：只在会话真的存在多条分支时出现（回溯后从锚点长出新对话，旧分支不删）。
+ * 与按消息的"⟲ 从这里重新开始"分工不同：那个是"回到过去重开"，这个是"在已有分支间切换"。
+ */
+function BranchBar({
+  branches,
+  onSwitch,
+}: {
+  branches: BranchInfo[];
+  onSwitch: (leafId: string) => void;
+}): JSX.Element {
+  // 深度浅的分支通常更早产生，按深度排序让顺序稳定，避免 Map 迭代顺序造成按钮跳动。
+  const sorted = [...branches].sort((a, b) => a.depth - b.depth);
+  return (
+    <div data-testid="branch-bar" className="helios-branch-bar">
+      <span className="helios-branch-label">分支</span>
+      {sorted.map((b, i) => (
+        <button
+          key={b.leafId}
+          type="button"
+          data-testid="branch-chip"
+          data-current={b.isCurrent ? "true" : "false"}
+          className="helios-branch-chip"
+          aria-current={b.isCurrent ? "true" : undefined}
+          title={b.preview || `分支 ${i + 1}`}
+          disabled={b.isCurrent}
+          onClick={() => onSwitch(b.leafId)}
+        >
+          {i + 1}
+          {b.preview ? <span className="helios-branch-preview">{b.preview}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ChatView({
   client,
   renderTool,
@@ -256,8 +293,11 @@ export function ChatView({
     send,
     stop,
     rollback,
+    branches,
+    switchBranch,
     canStop,
     canRollback,
+    canSwitchBranch,
     pendingQuestion,
     answer,
   } = useChat(client, { renderTool });
@@ -331,6 +371,9 @@ export function ChatView({
       </div>
 
       <div className="helios-composer">
+        {canSwitchBranch && branches.length > 1 ? (
+          <BranchBar branches={branches} onSwitch={(leafId) => void switchBranch(leafId)} />
+        ) : null}
         {composerHeader ? <div className="helios-composer-header">{composerHeader}</div> : null}
         <div className="helios-input-row">
           <textarea

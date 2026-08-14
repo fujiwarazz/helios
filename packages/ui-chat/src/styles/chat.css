@@ -444,6 +444,52 @@
 .helios-composer-header {
   margin-bottom: var(--h-space-2);
 }
+
+/* --- 分支条（仅多分支时出现，复用回溯入口的克制视觉语言）--- */
+.helios-branch-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--h-space-2);
+  margin-bottom: var(--h-space-2);
+  overflow-x: auto;
+}
+.helios-branch-label {
+  color: var(--h-text-faint);
+  font-size: var(--h-fs-xs);
+  flex: none;
+}
+.helios-branch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--h-space-1);
+  flex: none;
+  max-width: 220px;
+  border: 1px solid var(--h-border);
+  background: transparent;
+  color: var(--h-text-muted);
+  font-size: var(--h-fs-xs);
+  padding: 2px var(--h-space-2);
+  border-radius: var(--h-radius-sm);
+  cursor: pointer;
+}
+.helios-branch-chip:hover:not(:disabled) {
+  color: var(--h-accent);
+  border-color: var(--h-accent);
+  background: var(--h-accent-weak);
+}
+/* 当前分支：高亮且不可点（切到自己无意义） */
+.helios-branch-chip[data-current="true"] {
+  color: var(--h-accent);
+  border-color: var(--h-accent);
+  background: var(--h-accent-weak);
+  cursor: default;
+}
+.helios-branch-preview {
+  color: var(--h-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .helios-input-row {
   display: flex;
   align-items: flex-end;

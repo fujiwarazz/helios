@@ -71,6 +71,41 @@ describe("@helios/host serveKernelOverWs —— 客户端驱动真实 Kernel Ses
     const history = (await rpc.call("history")) as Message[];
     expect(history.some((m) => m.role === "assistant")).toBe(true);
   });
+
+  it("分支 RPC 往返：rollback 后长出新分支，listBranches 能枚举、switchBranch 能切回", async () => {
+    const url = `ws://127.0.0.1:${handle.port}`;
+    const rpc = new RpcClient(() => nodeWsClientTransport(url));
+    cleanups.push(() => rpc.close());
+
+    const sessionId = (await rpc.call("sessionId")) as string;
+    const events: AgentEvent[] = [];
+    rpc.on(`session:${sessionId}`, (payload) => events.push(payload as AgentEvent));
+
+    await rpc.call("sendMessage", { text: "第一轮" }, { timeoutMs: 15_000 });
+    await waitFor(() => events.filter((e) => e.type === "agent_end").length === 1, 5_000);
+    const mainLeafId = ((await rpc.call("displayHistory")) as Message[]).slice(-1)[0].id;
+
+    // 回溯到这一轮之前，再发一条 → 从锚点长出第二条分支
+    await rpc.call("rollback", { turnId: `${sessionId}-0-0` });
+    await rpc.call("sendMessage", { text: "另一条分支" }, { timeoutMs: 15_000 });
+    await waitFor(() => events.filter((e) => e.type === "agent_end").length === 2, 5_000);
+
+    const branches = (await rpc.call("listBranches")) as {
+      leafId: string;
+      isCurrent: boolean;
+      preview: string;
+    }[];
+    expect(branches).toHaveLength(2);
+    expect(branches.map((b) => b.leafId)).toContain(mainLeafId);
+    // 旧分支未被删除，且当前不在它上面
+    expect(branches.find((b) => b.leafId === mainLeafId)?.isCurrent).toBe(false);
+
+    // 切回旧分支：HEAD 变化会广播 head_changed，历史随之变回主线
+    await rpc.call("switchBranch", { leafId: mainLeafId });
+    await waitFor(() => events.some((e) => e.type === "head_changed"), 5_000);
+    const back = (await rpc.call("displayHistory")) as Message[];
+    expect(back.slice(-1)[0].id).toBe(mainLeafId);
+  });
 });
 
 describe("@helios/host serveKernelOverWs —— 工具渲染描述符（ToolRenderer 注册表接线）", () => {

@@ -4,7 +4,7 @@
 // 也让 ui-chat 可被同进程宿主(直接包 Session)或跨进程宿主(RpcChatClient)复用。
 // ============================================================================
 
-import type { AgentEvent } from "@helios/kernel";
+import type { AgentEvent, BranchInfo } from "@helios/kernel";
 import type { Message, ToolStatus, ToolRenderDescriptor } from "@helios/ports";
 
 /** 连接状态。同进程实现可恒为 "open";跨进程(RpcChatClient)反映真实 WS 状态。 */
@@ -28,6 +28,13 @@ export interface IChatClient {
   onState?(cb: (s: ConnectionState) => void): () => void;
   /** 回溯到某 turn(可选:后端支持才提供)。 */
   rollback?(turnId: string): Promise<void>;
+  /**
+   * 枚举会话内所有分支叶子（可选:后端支持才提供）。
+   * 回溯后从锚点长出新分支时旧分支不删，用户需要能看见并切回去。
+   */
+  listBranches?(): Promise<BranchInfo[]>;
+  /** 切换到某条分支的叶子（可选:后端支持才提供）。 */
+  switchBranch?(leafId: string): Promise<void>;
   /** 中断当前 run(可选:后端支持才提供,对应 Stop 按钮)。 */
   cancel?(): Promise<void>;
   /** 订阅工具审批提问(AskUserQuestion)。返回取消订阅函数。可选:后端支持才提供。 */
