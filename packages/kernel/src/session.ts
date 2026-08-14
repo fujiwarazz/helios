@@ -20,6 +20,7 @@ import type { TurnRecord } from "./agentLoop/types";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
 import type { ArtifactAction, FileEditObservation } from "./kernel";
 import { CostAwareRuntime } from "./agentLoop/costAwareRuntime";
+import type { Tracer } from "@helios/observability-langsmith";
 
 /** 压缩记录的磁盘形态（含 summary 节点内容，跨 resume 恢复压缩视图）。 */
 interface PersistedCompaction {
@@ -68,6 +69,7 @@ export interface SessionOptions {
   markAuditGap?: (gap: { toolUseId?: string; reason: string; createdAt: number }) => Promise<void>;
   acquireMutationLease?: (runId: string) => Promise<() => Promise<void>>;
   rollbackPolicy?: "full" | "conversation-only";
+  tracer: Tracer;
 }
 
 /** 会话元数据，落 `<sessionDir>/kernel-meta.json`，供兼容列表与 resume。 */
@@ -362,6 +364,7 @@ export class Session {
         fileSystem: ports.fileSystem,
         recordEdit: this.opts.recordEdit,
         markAuditGap: this.opts.markAuditGap,
+        tracer: this.opts.tracer,
       },
       tree: {
         appendNode: (msg) => this.appendNode(msg),
