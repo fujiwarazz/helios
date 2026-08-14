@@ -42,6 +42,7 @@ export default defineConfig({
       ),
       "@helios/protocol": resolve(__dirname, "packages/protocol/src/index.ts"),
       "@helios/ui-chat": resolve(__dirname, "packages/ui-chat/src/index.ts"),
+      "@helios/tui": resolve(__dirname, "packages/tui/src/index.ts"),
       "@helios/host": resolve(__dirname, "packages/host/src/index.ts"),
       "@helios/router-default": resolve(
         __dirname,

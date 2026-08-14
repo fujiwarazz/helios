@@ -35,6 +35,7 @@
       "@helios/protocol": ["./packages/protocol/src/index.ts"],
       "@helios/protocol/browser": ["./packages/protocol/src/browser.ts"],
       "@helios/ui-chat": ["./packages/ui-chat/src/index.ts"],
+      "@helios/tui": ["./packages/tui/src/index.ts"],
       "@helios/host": ["./packages/host/src/index.ts"],
       "@helios/router-default": ["./packages/router-default/src/index.ts"],
       "@helios/costmeter-default": ["./packages/costmeter-default/src/index.ts"],
