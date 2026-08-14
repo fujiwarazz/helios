@@ -255,4 +255,22 @@ describe("消息树 —— 分支跨 resume 存活", () => {
     expect(s2.getHistory().some((m) => textOf(m).includes("MAINLINE"))).toBe(true);
     expect(s2.getHistory().some((m) => textOf(m).includes("ALTBRANCH"))).toBe(false);
   });
+
+  it("分支预览取分叉点之后的第一条消息，而非叶子（叶子是 assistant 回复，多分支常常一样）", async () => {
+    const kernel = new Kernel({ workDir, manifest: manifest(), logger: silent });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+
+    await session.sendMessage("共同前缀");
+    const branchPointId = session.getHistory().slice(-1)[0].id;
+    await session.sendMessage("走方案甲");
+    await session.fork(branchPointId);
+    await session.sendMessage("走方案乙");
+
+    const previews = session.listBranches().map((b) => b.preview);
+    // mock LLM 两条分支的 assistant 回复完全相同；能区分分支的只有用户那条分叉消息
+    expect(previews).toHaveLength(2);
+    expect(previews.some((p) => p.includes("走方案甲"))).toBe(true);
+    expect(previews.some((p) => p.includes("走方案乙"))).toBe(true);
+  });
 });

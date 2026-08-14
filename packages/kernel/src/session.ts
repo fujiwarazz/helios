@@ -85,7 +85,7 @@ export interface KernelSessionMeta {
 /** @deprecated 使用 KernelSessionMeta；保留别名兼容既有消费方。 */
 export type SessionMeta = KernelSessionMeta;
 
-/** 分支信息：叶子节点 id + 从根到该叶子的深度 + 是否为当前分支 + 预览文本（供 UI）。 */
+/** 分支信息：叶子 id + 深度 + 是否当前分支 + 预览文本（取分叉点之后的第一条消息，见 listBranches）。 */
 export interface BranchInfo {
   leafId: string;
   depth: number;
@@ -239,24 +239,31 @@ export class Session {
    * 短暂成为叶子（都在 sendMessage 内部，无外部可观察窗口）。
    */
   listBranches(): BranchInfo[] {
-    const hasChild = new Set<string>();
+    const childCount = new Map<string, number>();
     for (const n of this.nodes.values()) {
-      if (n.parentId) hasChild.add(n.parentId);
+      if (n.parentId) childCount.set(n.parentId, (childCount.get(n.parentId) ?? 0) + 1);
     }
     const branches: BranchInfo[] = [];
     for (const n of this.nodes.values()) {
-      if (hasChild.has(n.id)) continue; // 非叶子跳过
+      if (childCount.has(n.id)) continue; // 非叶子跳过
       let depth = 0;
+      // 分叉消息 = 从叶子上溯途中，最后一个"父节点有多个子"的节点，即本分支独有的第一条消息。
+      // 用它做预览而不是叶子：叶子是 assistant 回复，多条分支常常长得一样（同一问题的不同重试），
+      // 分叉点之后的第一条消息才是用户真正用来区分分支的内容。
+      let divergence: Message | undefined;
       let cur: string | null = n.id;
       while (cur) {
+        const node = this.nodes.get(cur);
+        if (!node) break;
         depth++;
-        cur = this.nodes.get(cur)?.parentId ?? null;
+        if (node.parentId && (childCount.get(node.parentId) ?? 0) > 1) divergence = node;
+        cur = node.parentId ?? null;
       }
       branches.push({
         leafId: n.id,
         depth,
         isCurrent: n.id === this.headId,
-        preview: previewOf(n),
+        preview: previewOf(divergence ?? n),
       });
     }
     return branches;
