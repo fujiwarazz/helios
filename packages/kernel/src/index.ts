@@ -31,6 +31,17 @@ export {
   MultiAgentNotEnabledError,
 } from "./noop";
 export { builtinCapabilityProvider } from "./builtin/provider";
+export { BASE_SYSTEM_PROMPT, buildEnvBlock } from "./prompt/systemPrompt";
+export type { EnvInfo } from "./prompt/systemPrompt";
+export {
+  loadProjectInstructions,
+  renderProjectInstructions,
+  resolveGlobalInstructionDir,
+} from "./prompt/projectInstructions";
+export type {
+  ProjectInstructionFile,
+  LoadProjectInstructionsOptions,
+} from "./prompt/projectInstructions";
 export {
   createBuiltinTools,
   createBashTool,

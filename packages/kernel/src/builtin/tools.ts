@@ -16,6 +16,12 @@ const BASH_TIMEOUT_DEFAULT = 120_000;
 const BASH_TIMEOUT_MAX = 600_000; // 硬上限，防 LLM 传超大 timeout 挂死
 const WEBFETCH_TIMEOUT = 15_000;
 const WEBFETCH_MAX_BYTES = 5 * 1024 * 1024; // 5MB，边读边截，不读全 body
+const WEBFETCH_MAX_CHARS = 50_000; // 转纯文本后返回给模型的上限
+const GREP_MAX_HITS = 200;
+
+// 工具描述面向 LLM，用英文书写，且**只陈述本文件代码里真实存在的约束**（超时值、唯一性校验、
+// 各类上限、SSRF 拒绝、Task 的异步语义）。不写"读取前必须先 Read"这类代码并未强制的规则——
+// 那属于行为规范，放在 BASE_SYSTEM_PROMPT 的 `# Doing tasks` 里，避免描述承诺一个不存在的报错。
 
 /** SSRF 防护：拒绝非 http(s)、以及指向本机/内网/云元数据的地址（字面 IP + localhost）。 */
 export function assertFetchUrlAllowed(raw: string): void {
@@ -90,12 +96,19 @@ async function readCapped(resp: Response, maxBytes: number): Promise<string> {
 export function createBashTool(): Tool {
   return {
     name: "Bash",
-    description: "在工作目录执行一条 shell 命令，返回 stdout/stderr。",
+    description: `Run one shell command in the working directory and return its stdout and stderr combined. A non-zero exit code is reported as an error.
+
+Use a dedicated tool instead whenever one fits: Read to read a file, Edit or Write to change one, Grep to search contents, Glob to find paths. Those are more reliable here and let the user review the change.
+
+Timeout defaults to ${BASH_TIMEOUT_DEFAULT / 1000}s and is capped at ${BASH_TIMEOUT_MAX / 1000}s. Quote paths containing spaces. Chain commands that depend on each other with \`&&\` in a single call; issue independent commands as separate parallel calls.`,
     inputSchema: {
       type: "object",
       properties: {
-        command: { type: "string", description: "要执行的命令" },
-        timeout: { type: "number", description: "超时毫秒，默认 120000" },
+        command: { type: "string", description: "The shell command to run." },
+        timeout: {
+          type: "number",
+          description: `Timeout in milliseconds. Defaults to ${BASH_TIMEOUT_DEFAULT}, capped at ${BASH_TIMEOUT_MAX}.`,
+        },
       },
       required: ["command"],
     },
@@ -124,10 +137,17 @@ export function createBashTool(): Tool {
 export function createReadTool(fileSystem: FileSystemPort): Tool {
   return {
     name: "Read",
-    description: "读取文件内容（带行号）。",
+    description: `Read a text file and return its full contents with line numbers prefixed. The whole file is returned — there is no pagination, so prefer Grep to locate what you need in a large file before reading it.
+
+Paths may be absolute or relative to the working directory, and must stay inside it.`,
     inputSchema: {
       type: "object",
-      properties: { file_path: { type: "string" } },
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Path to the file, absolute or relative to the working directory.",
+        },
+      },
       required: ["file_path"],
     },
     async execute(input) {
@@ -145,10 +165,18 @@ export function createReadTool(fileSystem: FileSystemPort): Tool {
 export function createWriteTool(fileSystem: FileSystemPort): Tool {
   return {
     name: "Write",
-    description: "写入（覆盖）文件内容。",
+    description: `Create a file, or replace an existing file's contents entirely. Missing parent directories are created automatically.
+
+Prefer Edit when changing a file that already exists — Write replaces the whole file, so any content you did not restate is lost. Use Write for new files or a deliberate full rewrite. Do not create documentation or README files unless the user asked for them.`,
     inputSchema: {
       type: "object",
-      properties: { file_path: { type: "string" }, content: { type: "string" } },
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Path to the file, absolute or relative to the working directory.",
+        },
+        content: { type: "string", description: "The complete new contents of the file." },
+      },
       required: ["file_path", "content"],
     },
     fileMutations: (input) => [
@@ -165,14 +193,25 @@ export function createWriteTool(fileSystem: FileSystemPort): Tool {
 export function createEditTool(fileSystem: FileSystemPort): Tool {
   return {
     name: "Edit",
-    description: "在文件中做精确字符串替换。",
+    description: `Replace an exact string in a file.
+
+\`old_string\` must appear exactly once, or the call fails and nothing is written — include enough surrounding lines to make it unique rather than retrying with the same short string. Set \`replace_all\` to change every occurrence instead. \`old_string\` must not appear in the output of a previous Read with the line-number prefix still attached; match the file's real content, preserving its existing indentation exactly.`,
     inputSchema: {
       type: "object",
       properties: {
-        file_path: { type: "string" },
-        old_string: { type: "string" },
-        new_string: { type: "string" },
-        replace_all: { type: "boolean" },
+        file_path: {
+          type: "string",
+          description: "Path to the file, absolute or relative to the working directory.",
+        },
+        old_string: {
+          type: "string",
+          description: "Exact text to replace. Must be unique in the file unless replace_all is set.",
+        },
+        new_string: { type: "string", description: "Text to replace it with." },
+        replace_all: {
+          type: "boolean",
+          description: "Replace every occurrence instead of requiring a unique match.",
+        },
       },
       required: ["file_path", "old_string", "new_string"],
     },
@@ -206,10 +245,17 @@ export function createEditTool(fileSystem: FileSystemPort): Tool {
 export function createGlobTool(fileSystem: FileSystemPort): Tool {
   return {
     name: "Glob",
-    description: "按 glob 模式匹配文件路径。",
+    description: `Find files by glob pattern, for example \`src/**/*.ts\` or \`**/package.json\`. Returns paths relative to the working directory, one per line.
+
+Patterns are resolved from the working directory and must stay inside it — a pattern containing \`..\` is rejected. \`node_modules\` and \`.git\` are never matched, and dotfiles are skipped.`,
     inputSchema: {
       type: "object",
-      properties: { pattern: { type: "string" } },
+      properties: {
+        pattern: {
+          type: "string",
+          description: "Glob pattern relative to the working directory. Must not contain '..'.",
+        },
+      },
       required: ["pattern"],
     },
     async execute(input) {
@@ -223,13 +269,18 @@ export function createGlobTool(fileSystem: FileSystemPort): Tool {
 export function createGrepTool(fileSystem: FileSystemPort): Tool {
   return {
     name: "Grep",
-    description: "在文件内容中做正则搜索（纯 JS 行级匹配）。",
+    description: `Search file contents with a JavaScript regular expression, line by line. Each hit is returned as \`path:line:text\`.
+
+Narrow the search with \`glob\` (defaults to \`**/*\`) — it is much faster than searching everything. Binary files, \`node_modules\`, \`.git\`, and dotfiles are skipped. At most ${GREP_MAX_HITS} hits are returned; if you reach that limit the result is incomplete, so tighten the pattern or the glob rather than reading the truncated list as the full answer.`,
     inputSchema: {
       type: "object",
       properties: {
-        pattern: { type: "string" },
-        glob: { type: "string", description: "限定文件的 glob，默认 **/*" },
-        ignore_case: { type: "boolean" },
+        pattern: { type: "string", description: "JavaScript regular expression source." },
+        glob: {
+          type: "string",
+          description: "Restrict the search to files matching this glob. Defaults to '**/*'.",
+        },
+        ignore_case: { type: "boolean", description: "Match case-insensitively." },
       },
       required: ["pattern"],
     },
@@ -258,9 +309,9 @@ export function createGrepTool(fileSystem: FileSystemPort): Tool {
         const lines = content.split("\n");
         for (let i = 0; i < lines.length; i++) {
           if (re.test(lines[i]!)) hits.push(`${f}:${i + 1}:${lines[i]}`);
-          if (hits.length >= 200) break;
+          if (hits.length >= GREP_MAX_HITS) break;
         }
-        if (hits.length >= 200) break;
+        if (hits.length >= GREP_MAX_HITS) break;
       }
       return { output: hits.join("\n") || "(无匹配)" };
     },
@@ -270,10 +321,12 @@ export function createGrepTool(fileSystem: FileSystemPort): Tool {
 export function createWebFetchTool(): Tool {
   return {
     name: "WebFetch",
-    description: "抓取一个 URL 并将 HTML 转为纯文本返回。",
+    description: `Fetch an http or https URL and return the page converted from HTML to plain text, truncated to ${WEBFETCH_MAX_CHARS} characters. Redirects are followed; the request times out after ${WEBFETCH_TIMEOUT / 1000}s.
+
+Requests to localhost, loopback, private-range, link-local, and cloud metadata addresses are refused. Only fetch URLs the user gave you or that you found in the repository — do not guess or construct URLs.`,
     inputSchema: {
       type: "object",
-      properties: { url: { type: "string" } },
+      properties: { url: { type: "string", description: "Absolute http or https URL." } },
       required: ["url"],
     },
     async execute(input, ctx: ToolContext) {
@@ -294,7 +347,7 @@ export function createWebFetchTool(): Tool {
         const resp = await fetch(url, { redirect: "follow", signal });
         const html = await readCapped(resp, WEBFETCH_MAX_BYTES); // 边读边截，防内存打满
         const text = htmlToText(html, { wordwrap: false });
-        return { output: text.slice(0, 50_000) };
+        return { output: text.slice(0, WEBFETCH_MAX_CHARS) };
       } catch (err) {
         return { output: err instanceof Error ? err.message : String(err), isError: true };
       } finally {
@@ -307,15 +360,20 @@ export function createWebFetchTool(): Tool {
 export function createAskQuestionTool(): Tool {
   return {
     name: "AskUserQuestion",
-    description: "向用户提问以澄清需求，返回用户的选择。",
+    description: `Ask the user a question and return their answer.
+
+Use this when the requirement is ambiguous, or when you must choose between approaches with materially different outcomes and the codebase does not settle the choice. Supply 2-4 concrete options when there are distinct alternatives; the user can always answer freely instead.
+
+Do not use it for anything you can determine by reading the code, and do not use it to ask for permission to continue work you were already asked to do.`,
     inputSchema: {
       type: "object",
       properties: {
-        question: { type: "string" },
+        question: { type: "string", description: "The question, specific and self-contained." },
         options: {
           type: "array",
           items: { type: "object" },
-          description: "可选项 [{label, description}]",
+          description:
+            "Optional distinct choices, each { label, description }. Omit for an open question.",
         },
       },
       required: ["question"],
@@ -334,12 +392,23 @@ export function createAskQuestionTool(): Tool {
 export function createTaskTool(multiAgent: MultiAgentPort): Tool {
   return {
     name: "Task",
-    description: "派生一个 teammate 子智能体并派发任务（依赖 MultiAgentPort，未启用时返回错误）。",
+    description: `Hand a self-contained task to a teammate agent that works independently. Requires the multi-agent capability; returns an error when it is not enabled.
+
+This call only dispatches the task and returns immediately — it does NOT return the teammate's result. The teammate replies later through the mailbox, so do not wait on this tool's output for an answer, and do not dispatch work you need before your next step.
+
+The teammate cannot see this conversation. Describe the task completely: what to do, which files or paths matter, and what a finished result looks like.`,
     inputSchema: {
       type: "object",
       properties: {
-        name: { type: "string", description: "teammate 名称/角色，默认 teammate" },
-        description: { type: "string", description: "要交给 teammate 的任务描述" },
+        name: {
+          type: "string",
+          description: "Teammate name or role. Defaults to 'teammate'.",
+        },
+        description: {
+          type: "string",
+          description:
+            "The complete, self-contained task. The teammate has no access to this conversation.",
+        },
       },
       required: ["description"],
     },

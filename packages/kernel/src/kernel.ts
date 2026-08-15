@@ -19,6 +19,9 @@ import { uid } from "./ids";
 import type { LlmRetryOptions } from "./agentLoop/retryBackoff";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { platform, release } from "node:os";
+import { BASE_SYSTEM_PROMPT, buildEnvBlock } from "./prompt/systemPrompt";
+import { loadProjectInstructions, renderProjectInstructions } from "./prompt/projectInstructions";
 import { createLangSmithTracer, type Tracer } from "@helios/observability-langsmith";
 
 /** 只读的 port/工具聚合信息，供 UI 的 Ports 页展示。 */
@@ -28,16 +31,19 @@ export interface PortInfo {
   enabled: boolean;
 }
 
-const DEFAULT_SYSTEM =
-  "你是 helios，一个可插拔的 AI 编程助手。使用可用的工具完成用户任务，保持简洁。";
-
 export interface KernelOptions {
   workDir: string;
   /** Session 持久化目录；缺省保持 `<workDir>/.helios/sessions` 兼容行为。 */
   sessionDataRoot?: string;
   manifest: Manifest;
   logger?: Logger;
+  /** 覆盖基础系统提示词正文（BASE_SYSTEM_PROMPT）。env 块与项目指令仍会追加。 */
   system?: string;
+  /**
+   * 覆盖全局指令目录（`~/.helios`）。传空串可关闭全局 AGENTS.md 加载，
+   * 测试用来避免读到开发者本机的真实文件。
+   */
+  globalInstructionDir?: string;
   llmOptions?: LLMOptions;
   /** 宿主提供的裸包解析器，锚定到宿主自身依赖（如 `(s) => import.meta.resolve(s)`）。 */
   resolvePackage?: PackageResolver;
@@ -86,6 +92,11 @@ export class Kernel {
   private readonly tracer: Tracer;
   private started = false;
   private disposePromise: Promise<void> | undefined;
+  /**
+   * 完整系统提示词 = 基础正文 + 项目指令 + env 块。start() 时算一次并缓存，之后每个 Session 共用同一
+   * 字符串——llm-anthropic 对整个 system 打了 cache_control 断点，逐会话重算会砸掉 prompt cache。
+   */
+  private resolvedSystem = BASE_SYSTEM_PROMPT;
 
   constructor(private readonly opts: KernelOptions) {
     this.logger = opts.logger ?? consoleLogger();
@@ -121,6 +132,8 @@ export class Kernel {
       throw new Error("启动中止：manifest 未配置 FileSystemPort（六件套依赖的基座）。");
     }
 
+    this.resolvedSystem = await this.buildSystemPrompt();
+
     // 六件套内建 provider —— 命名豁免前缀，其余一切与用户 provider 相同
     await this.activateProvider(builtinCapabilityProvider, ctx, true);
     for (const cap of capabilities) {
@@ -142,6 +155,31 @@ export class Kernel {
     this.logger.info(
       `helios kernel 启动完成：LLM=[${this.llm.list().join(",")}] 工具数=${this.tools.list().length}`,
     );
+  }
+
+  /**
+   * 拼装完整系统提示词，顺序 base → project_context → env。
+   * 项目指令放在 base 之后是为了兑现 base 末尾那句「project instructions win」；
+   * env 放最后是沿用 valos 的做法：环境事实靠近对话，模型更容易取用。
+   */
+  private async buildSystemPrompt(): Promise<string> {
+    const fileSystem = this.ports.fileSystem;
+    const files = await loadProjectInstructions({
+      fileSystem,
+      globalDir: this.opts.globalInstructionDir,
+    });
+    if (files.length > 0) {
+      this.logger.debug(`项目指令已加载：${files.map((f) => f.path).join(", ")}`);
+    }
+    const envBlock = buildEnvBlock({
+      workDir: this.opts.workDir,
+      isGitRepo: await fileSystem.exists(".git"),
+      platform: platform(),
+      osVersion: release(),
+    });
+    return [this.opts.system ?? BASE_SYSTEM_PROMPT, renderProjectInstructions(files), envBlock]
+      .filter((part) => part !== "")
+      .join("\n\n");
   }
 
   private async activateProvider(
@@ -189,7 +227,7 @@ export class Kernel {
       hooks: this.hooks,
       logger: this.logger,
       llmOptions: this.opts.llmOptions ?? {},
-      system: this.opts.system ?? DEFAULT_SYSTEM,
+      system: this.resolvedSystem,
       askQuestion: opts.askQuestion,
       maxTurns: opts.maxTurns,
       llmRetry: opts.llmRetry,
