@@ -377,7 +377,7 @@ export class Session {
     this.emit({ type: "agent_start", runId });
 
     // run 开始前：对当前路径按策略压缩（把 summary 作为真实节点追加到 HEAD 之下）。
-    await this.maybeCompact();
+    await this.maybeCompact(runId);
 
     // 缓存纪律一：system 前缀（base + memory 召回 + SessionStart 注入）每会话只算一次并冻结，之后每 run 复用。
     if (this.systemPrefix === null) {
@@ -479,7 +479,7 @@ export class Session {
    * summary 节点只装摘要文本，不含 system/tools（那是独立稳定前缀，复制进节点会砸 cache 且 token 翻倍）。
    * CompactStrategyPort 未加载时 shouldCompact 恒 false。
    */
-  private async maybeCompact(): Promise<void> {
+  private async maybeCompact(runId: string): Promise<void> {
     const path = this.pathToHead();
     if (path.length === 0) return;
     const { ports } = this.opts;
@@ -490,7 +490,7 @@ export class Session {
     if (!ports.compact.shouldCompact(state)) return;
 
     this.emit({ type: "compact_start", messageCount: path.length });
-    const summary = await ports.compact.compact([...path]);
+    const summary = await ports.compact.compact([...path], runId);
     const covered = new Set(summary.coveredMessageIds);
 
     // 安全切点（含 Q1 吸附：首个保留节点绝不为 toolResult，杜绝孤儿 tool_result → Anthropic 400）。
