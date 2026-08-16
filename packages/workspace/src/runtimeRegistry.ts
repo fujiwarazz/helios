@@ -59,6 +59,12 @@ export interface LocalRuntimeRegistryOptions {
   kernelFactory?: (options: KernelOptions) => Kernel;
   editRecords?: LocalEditRecordStore;
   mutations?: LocalMutationCoordinator;
+  /**
+   * Enables the built-in Bash tool for this runtime. Off by default: a shell can write outside
+   * the Workspace and its writes cannot be attributed to a toolUseId, so hosts that opt in get
+   * their sessions marked audit-incomplete (see README「Workspace Runtime 暂时禁用 Bash」).
+   */
+  allowShellTool?: boolean;
 }
 
 interface RuntimeEntry {
@@ -98,6 +104,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
   private readonly draftTtlMs: number;
   private readonly idFactory: (prefix: "sess" | "mat" | "runtime") => string;
   private readonly kernelFactory: (options: KernelOptions) => Kernel;
+  private readonly allowShellTool: boolean;
   private readonly runtimes = new Map<string, RuntimeEntry>();
   private readonly runtimeStarts = new Map<string, Promise<RuntimeEntry>>();
   private readonly runtimeKeysById = new Map<string, string>();
@@ -119,6 +126,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
     this.kernelFactory = options.kernelFactory ?? ((kernelOptions) => new Kernel(kernelOptions));
     this.editRecords = options.editRecords;
     this.mutations = options.mutations;
+    this.allowShellTool = options.allowShellTool ?? false;
   }
 
   async createSession(
@@ -174,8 +182,12 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
           },
           binding: persistedBinding,
           state: "starting",
-          auditStatus: "complete",
-          auditGaps: [],
+          // A shell can write anywhere, so an audit gap is recorded up front rather than pretending
+          // the edit records cover every mutation of this session.
+          auditStatus: this.allowShellTool ? "incomplete" : "complete",
+          auditGaps: this.allowShellTool
+            ? [{ reason: "Bash enabled: shell writes are not attributed", createdAt: this.now() }]
+            : [],
         };
         await this.sessions.create(record);
         this.drafts.delete(sessionId);
@@ -386,7 +398,7 @@ export class LocalRuntimeRegistry implements RuntimeRegistry {
       sessionDataRoot: join(this.paths.dataRoot, "sessions"),
       manifest: runtimeManifest,
       logger: this.logger,
-      disabledBuiltinTools: ["Bash"],
+      disabledBuiltinTools: this.allowShellTool ? [] : ["Bash"],
     });
     await kernel.start();
     const runtime: RuntimeEntry = {

@@ -4,8 +4,9 @@ Helios 是一个可插拔的代码 Agent，提供 Electron、Web 和 CLI 三种�
 
 ## Chat 与 Code
 
-- 默认进入 Chat。每个 Chat 自动创建独立的托管 Workspace，文件不会写入 Helios 仓库。
-- 设置 `HELIOS_CODE_MODE=1` 后，Electron/Web 主页面显示 Chat/Code 切换；Sidebar 不变，Code 的仓库选择器位于输入框上方。
+- Electron/Web 默认进入 Chat。每个 Chat 自动创建独立的托管 Workspace，文件不会写入 Helios 仓库。
+- CLI 默认进入 Code：以启动目录所在的 Git 仓库根（无 Git 时即该目录）作为 Workspace，`direct` 直接修改原仓库，语义对齐 pi/claude-code/codex；`--chat` 退回托管 Chat Workspace。同一目录重复启动复用同一个 Workspace 条目，共享 memory、会话与编辑记录。
+- 设置 `HELIOS_CODE_MODE=1` 后，Electron/Web 主页面显示 Chat/Code 切换；Sidebar 不变，Code 的仓库选择器位于输入框上方。CLI 不需要该开关。
 - Code 可导入宿主本地目录或通过 HTTPS/SSH URL 执行 Git Clone。
 - 默认 `direct`，Agent 会直接修改原仓库；Git 仓库可选 `worktree`，平台会创建 `helios/<materializationId>` 隔离分支。
 - 首条消息发送后 Workspace 绑定锁定；切换仓库需要新建会话。
@@ -51,9 +52,10 @@ Web 的“本地目录”是 Web Host 所在机器能访问且位于 `HELIOS_WOR
 CLI：
 
 ```bash
-pnpm --filter @helios/cli start                         # Chat
-pnpm --filter @helios/cli start -- --code .            # Code direct
-pnpm --filter @helios/cli start -- --code . --worktree # Code worktree
+pnpm --filter @helios/cli start                         # Code direct（启动目录所在仓库）
+pnpm --filter @helios/cli start -- --worktree           # Code worktree（隔离分支）
+pnpm --filter @helios/cli start -- --chat               # 托管 Chat workspace
+pnpm --filter @helios/cli start -- --code <path>        # 指定其他目录
 pnpm --filter @helios/cli start -- --clone git@github.com:org/repo.git
 pnpm --filter @helios/cli start -- --workspace <workspaceId>
 pnpm --filter @helios/cli start -- --resume <sessionId>
@@ -81,7 +83,7 @@ Git Clone 不持久化凭据。HTTPS 使用系统 credential helper，SSH 使用
     edits.jsonl
 ```
 
-文件属于 Workspace；消息、turn、编辑记录与审计状态按 `sessionId` 隔离。当前 Write/Edit 会写入逐文件 EditRecord；direct Workspace 会在每次 Agent run 前后记录 fingerprint，检测到 Helios 之外的修改时把会话标记为审计不完整。Workspace Runtime 暂时禁用 Bash，因为仅设置 cwd 不能限制任意 shell 命令越过 Workspace 边界；完成 Sandbox confinement 与外部进程审计后再开放。
+文件属于 Workspace；消息、turn、编辑记录与审计状态按 `sessionId` 隔离。当前 Write/Edit 会写入逐文件 EditRecord；direct Workspace 会在每次 Agent run 前后记录 fingerprint，检测到 Helios 之外的修改时把会话标记为审计不完整。Bash 由 Runtime 的 `allowShellTool` 控制：Electron/Web 仍禁用，因为仅设置 cwd 不能限制任意 shell 命令越过 Workspace 边界；CLI 运行在用户自己的终端上，默认开启，代价是它创建的会话一律记为审计不完整（`Bash enabled: shell writes are not attributed`）。完成 Sandbox confinement 与外部进程审计后再对三端统一开放。
 
 ## 开发验证
 
