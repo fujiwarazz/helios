@@ -114,6 +114,12 @@ Timeout defaults to ${BASH_TIMEOUT_DEFAULT / 1000}s and is capped at ${BASH_TIME
     },
     async execute(input, ctx: ToolContext) {
       const { command, timeout } = input as { command: string; timeout?: number };
+      // 已取消就不 spawn：execa 的 cancelSignal 只保证"运行中取消"，signal 在启动前就已
+      // abort 时它仍会先起进程再杀，能否立刻回收取决于 Node/OS（Node 20 的 Linux runner 上
+      // 会等满命令自身耗时）。这里直接短路，取消语义才与平台无关。
+      if (ctx.signal?.aborted) {
+        return { output: "命令已取消", isError: true };
+      }
       // timeout 缺省或 <=0（含 0 会被 execa 解读为"永不超时"）时回落默认值，再夹到硬上限。
       const wanted = typeof timeout === "number" && timeout > 0 ? timeout : BASH_TIMEOUT_DEFAULT;
       const cappedTimeout = Math.min(wanted, BASH_TIMEOUT_MAX);
