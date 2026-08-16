@@ -33,14 +33,41 @@ export class SessionViewModel {
   private readonly toolOrder: string[] = [];
   private busy = false;
   private status = "Ready";
+  private noticeCount = 0;
 
   hydrate(history: readonly Message[]): void {
-    this.messages.clear();
-    this.messageOrder.length = 0;
+    this.reset();
     for (const message of history) {
       const { text, thinking } = contentToTranscript(message.content);
       this.putMessage({ id: message.id, role: message.role, text, thinking, complete: true });
     }
+  }
+
+  /**
+   * Discards the visual projection only. Kernel messages, branches, and persisted history are
+   * untouched; `/clear` and the rehydrate after `head_changed` share this entry point.
+   */
+  reset(): void {
+    this.messages.clear();
+    this.messageOrder.length = 0;
+    this.tools.clear();
+    this.toolOrder.length = 0;
+  }
+
+  /** Local, LLM-invisible transcript line (command output, resume/branch reports). */
+  notice(text: string): void {
+    this.noticeCount += 1;
+    this.putMessage({
+      id: `local-notice-${this.noticeCount}`,
+      role: "system",
+      text,
+      thinking: "",
+      complete: true,
+    });
+  }
+
+  setStatus(status: string): void {
+    this.status = status;
   }
 
   apply(event: AgentEvent): void {

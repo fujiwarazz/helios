@@ -106,6 +106,11 @@ export async function streamAssistant(params: StreamAssistantParams): Promise<St
     if (acc.streamError) break;
   }
 
+  if (!acc.streamError && !acc.textAccum && !acc.thinkingAccum && acc.toolCalls.size === 0) {
+    acc.streamError = "LLM returned an empty response";
+    logger.error(`LLM 流错误：${acc.streamError}`);
+  }
+
   const content: ContentBlock[] = [];
   // thinking 块须置于文本/工具之前（Anthropic 要求 thinking 在 assistant 内容最前）。
   if (acc.thinkingAccum) content.push({ type: "thinking", thinking: acc.thinkingAccum, signature: acc.thinkingSignature });

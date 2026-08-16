@@ -89,7 +89,7 @@ async function bootSession(
 }
 
 describe("LangSmith trace hierarchy", () => {
-  it("records an agent root and LLM child for a normal turn", async () => {
+  it("records an agent root and LLM child for an empty-response failure", async () => {
     const tracer = new RecordingTracer();
     const { session } = await bootSession("mockLlmEmpty.ts", [], undefined, { tracer });
 
@@ -100,13 +100,13 @@ describe("LangSmith trace hierarchy", () => {
         expect.objectContaining({
           name: "helios.agent_turn",
           runType: "chain",
-          result: expect.objectContaining({ status: "success" }),
+          result: expect.objectContaining({ status: "error", error: "LLM returned an empty response" }),
         }),
         expect.objectContaining({
           name: "helios.llm.stream",
           runType: "llm",
           parentId: "0",
-          result: expect.objectContaining({ status: "success" }),
+          result: expect.objectContaining({ status: "error", error: "LLM returned an empty response" }),
         }),
       ]),
     );
@@ -264,13 +264,16 @@ describe("输出截断（stopReason: max_tokens）—— 工具调用整批判�
 
 describe("Bug 7 —— 空 assistant 消息不入历史", () => {
   it("既无文本也无工具的回复：不产生 content:[] 空消息", async () => {
-    const { session } = await bootSession("mockLlmEmpty.ts");
+    const { session, events } = await bootSession("mockLlmEmpty.ts");
 
     const newMessages = await session.sendMessage("hi");
     // 只有 user 一条，空 assistant 被丢弃
     expect(newMessages.every((m: Message) => !(m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0))).toBe(true);
     const history = session.getHistory();
     expect(history.some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.length === 0)).toBe(false);
+    expect(events.find((event) => event.type === "agent_end")).toMatchObject({
+      error: "LLM returned an empty response",
+    });
   });
 });
 

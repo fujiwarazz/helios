@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,15 +75,27 @@ describe("CLI workspace flags", () => {
       codePath: ".",
       message: "hello",
       worktree: true,
+      chat: false,
     });
     expect(parseCliOptions(["--clone", "git@github.com:org/repo.git"])).toEqual({
       cloneUrl: "git@github.com:org/repo.git",
       worktree: false,
+      chat: false,
     });
     expect(parseCliOptions(["--workspace", "ws_1"])).toEqual({
       workspaceId: "ws_1",
       worktree: false,
+      chat: false,
     });
+  });
+
+  it("treats Code mode as the default and --chat as the opt out", () => {
+    expect(parseCliOptions([])).toEqual({ worktree: false, chat: false });
+    // Code mode is the default, so --worktree needs no explicit source.
+    expect(parseCliOptions(["--worktree"])).toEqual({ worktree: true, chat: false });
+    expect(parseCliOptions(["--chat"])).toEqual({ worktree: false, chat: true });
+    expect(() => parseCliOptions(["--chat", "--worktree"])).toThrow(/worktree.*chat/i);
+    expect(() => parseCliOptions(["--chat", "--code", "."])).toThrow(/chat.*code/i);
   });
 
   it("allows a legacy root only when resuming", () => {
@@ -93,6 +105,7 @@ describe("CLI workspace flags", () => {
       resume: "sess_1",
       legacyWorkDir: "/tmp/legacy",
       worktree: false,
+      chat: false,
     });
     expect(() => parseCliOptions(["--legacy-workdir", "/tmp/legacy"])).toThrow(
       /legacy-workdir.*resume/i,
@@ -106,7 +119,9 @@ describe("CLI workspace flags", () => {
     expect(() => parseCliOptions(["--code", ".", "--clone", "git@example:repo.git"])).toThrow(
       /only one/i,
     );
-    expect(() => parseCliOptions(["--worktree"])).toThrow(/worktree.*code/i);
+    expect(() => parseCliOptions(["--resume", "sess_1", "--worktree"])).toThrow(
+      /worktree.*resume/i,
+    );
   });
 
   it("rejects unknown, repeated, and valueless flags", () => {
@@ -127,11 +142,11 @@ describe("CLI workspace runtime", () => {
     );
   });
 
-  it("creates a managed Chat workspace and persists its session outside the repository", async () => {
+  it("creates a managed Chat workspace for --chat and persists its session outside the repository", async () => {
     const dataRoot = await temporaryRoot("helios-cli-data-");
     const cwd = await temporaryRoot("helios-cli-cwd-");
     const runtime = await openCliWorkspace({
-      cli: { worktree: false },
+      cli: { worktree: false, chat: true },
       cwd,
       dataRoot,
       manifest: MOCK_MANIFEST,
@@ -145,6 +160,67 @@ describe("CLI workspace runtime", () => {
       );
       expect(await readFile(new WorkspacePaths(dataRoot).sessionRecord(runtime.bound.session.id), "utf8"))
         .toContain('"schemaVersion": 1');
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("defaults to Code direct on the launch repository and reuses its workspace", async () => {
+    const dataRoot = await temporaryRoot("helios-cli-data-");
+    const repository = await createGitRepository(await temporaryRoot("helios-cli-repo-"));
+    const nested = join(repository, "packages", "app");
+    await mkdir(nested, { recursive: true });
+
+    // Launched from a subdirectory: the Git root becomes the workspace root, like pi/codex.
+    const first = await openCliWorkspace({
+      cli: { worktree: false, chat: false },
+      cwd: nested,
+      dataRoot,
+      manifest: MOCK_MANIFEST,
+      askQuestion: async () => ({ answers: [] }),
+    });
+    let workspaceId: string;
+    try {
+      expect(first.bound.binding.mode).toBe("code");
+      expect(first.bound.binding.roots[0]?.strategy).toBe("direct");
+      expect(first.bound.materialized.primaryDir).toBe(repository);
+      workspaceId = first.bound.binding.workspaceId;
+    } finally {
+      await first.close();
+    }
+
+    const second = await openCliWorkspace({
+      cli: { worktree: false, chat: false },
+      cwd: repository,
+      dataRoot,
+      manifest: MOCK_MANIFEST,
+      askQuestion: async () => ({ answers: [] }),
+    });
+    try {
+      expect(second.bound.binding.workspaceId).toBe(workspaceId);
+    } finally {
+      await second.close();
+    }
+  });
+
+  it("enables Bash and records the audit gap it implies", async () => {
+    const dataRoot = await temporaryRoot("helios-cli-data-");
+    const repository = await createGitRepository(await temporaryRoot("helios-cli-repo-"));
+    const runtime = await openCliWorkspace({
+      cli: { worktree: false, chat: false },
+      cwd: repository,
+      dataRoot,
+      manifest: MOCK_MANIFEST,
+      askQuestion: async () => ({ answers: [] }),
+    });
+    try {
+      expect(runtime.bound.kernel.listTools()).toContain("Bash");
+      await runtime.bound.session.sendMessage("hello");
+      const record = JSON.parse(
+        await readFile(new WorkspacePaths(dataRoot).sessionRecord(runtime.bound.session.id), "utf8"),
+      ) as { auditStatus: string; auditGaps: Array<{ reason: string }> };
+      expect(record.auditStatus).toBe("incomplete");
+      expect(record.auditGaps[0]?.reason).toMatch(/Bash enabled/);
     } finally {
       await runtime.close();
     }

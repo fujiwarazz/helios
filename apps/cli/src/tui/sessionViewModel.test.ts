@@ -81,8 +81,7 @@ describe("SessionViewModel", () => {
     });
   });
 
-  it("marks failed tools and failed runs as errors", () => {
-    const model = new SessionViewModel();
+  it("marks failed tools and failed runs as errors", () => {    const model = new SessionViewModel();
 
     model.apply({ type: "agent_start", runId: "run-1" });
     model.apply({ type: "tool_execution_start", toolUseId: "tool-1", name: "read", input: {} });
@@ -99,6 +98,34 @@ describe("SessionViewModel", () => {
       busy: false,
       status: "Error: provider unavailable",
       tools: [{ toolUseId: "tool-1", status: "error", output: "missing", isError: true }],
+    });
+  });
+
+  it("resets only the local projection and rehydrates from a new branch history", () => {
+    const model = new SessionViewModel();
+    model.hydrate([{ id: "user-1", role: "user", content: "first branch" }]);
+    model.apply({ type: "tool_execution_start", toolUseId: "tool-1", name: "read", input: {} });
+
+    model.reset();
+    expect(model.snapshot()).toMatchObject({ messages: [], tools: [] });
+
+    // head_changed replays the selected branch: rehydrate must not keep stale tool cards.
+    model.apply({ type: "tool_execution_start", toolUseId: "tool-2", name: "read", input: {} });
+    model.hydrate([{ id: "user-2", role: "user", content: "other branch" }]);
+    expect(model.snapshot()).toMatchObject({
+      messages: [{ id: "user-2", text: "other branch" }],
+      tools: [],
+    });
+  });
+
+  it("keeps local notices in the transcript as system messages", () => {
+    const model = new SessionViewModel();
+    model.notice("命令输出");
+    model.setStatus("Cleared");
+
+    expect(model.snapshot()).toMatchObject({
+      status: "Cleared",
+      messages: [{ role: "system", text: "命令输出", complete: true }],
     });
   });
 });

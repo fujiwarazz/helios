@@ -14,6 +14,16 @@ export interface OpenAIChunk {
         function?: { name?: string; arguments?: string };
       }>;
     };
+    /** 某些 OpenAI 兼容网关在 SSE chunk 中返回完整 message，而不是标准 delta。 */
+    message?: {
+      content?: string | null;
+      reasoning_content?: string | null;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
     finish_reason?: string | null;
   }>;
   /** 需请求带 stream_options:{include_usage:true}；通常在末尾 choices 为空的 chunk 上出现。 */
@@ -58,7 +68,7 @@ export async function* mapOpenAIStream(
     const choice = chunk.choices?.[0];
     if (!choice) continue;
 
-    const delta = choice.delta;
+    const delta = choice.delta ?? choice.message;
     if (delta?.reasoning_content) {
       yield { type: "thinking-delta", text: delta.reasoning_content };
     }
