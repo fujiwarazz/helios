@@ -11,6 +11,8 @@ import { selectInteractiveMode } from "./interactiveMode";
 import { CliUsageError, parseCliOptions } from "./options";
 import { HeliosInteractiveView } from "./tui/heliosInteractiveView";
 import { InteractiveCli } from "./tui/interactiveCli";
+import type { ModelDescription } from "./tui/slashCommands";
+import { createTuiLogger } from "./tui/tuiLogger";
 import { openCliWorkspace, type CliWorkspaceRuntime } from "./workspaceRuntime";
 
 const DEFAULT_MANIFEST: Manifest = {
@@ -20,21 +22,30 @@ const DEFAULT_MANIFEST: Manifest = {
   ],
 };
 
-async function loadManifest(workDir: string): Promise<Manifest> {
-  let manifest = DEFAULT_MANIFEST;
+async function readManifest(workDir: string): Promise<Manifest> {
   try {
-    manifest = JSON.parse(
-      await readFile(resolve(workDir, "helios.config.json"), "utf8"),
-    ) as Manifest;
+    return JSON.parse(await readFile(resolve(workDir, "helios.config.json"), "utf8")) as Manifest;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return DEFAULT_MANIFEST;
   }
+}
+
+function resolveManifest(manifest: Manifest, workDir: string): Manifest {
   return {
     plugins: manifest.plugins.map((entry) => ({
       ...entry,
       package: resolvePluginPackage(entry.package, workDir),
     })),
   };
+}
+
+/** `/model` reports configuration only; runtime routing stays a manifest/Kernel concern. */
+function describeManifestModel(manifest: Manifest): ModelDescription | undefined {
+  const entry = manifest.plugins.find((plugin) => plugin.port === "LLMProvider");
+  if (!entry) return undefined;
+  const options = (entry.options ?? {}) as { model?: string; baseURL?: string };
+  return { provider: entry.package, model: options.model, baseURL: options.baseURL };
 }
 
 function resolvePluginPackage(specifier: string, workDir: string): string {
@@ -46,9 +57,17 @@ function resolvePluginPackage(specifier: string, workDir: string): string {
 async function main(): Promise<void> {
   const cli = parseCliOptions(process.argv.slice(2));
   const workDir = findManifestRoot(process.cwd());
-  const manifest = await loadManifest(workDir);
+  const declaredManifest = await readManifest(workDir);
+  const manifest = resolveManifest(declaredManifest, workDir);
   const dataRoot = resolve(process.env.HELIOS_DATA_ROOT ?? join(homedir(), ".helios"));
   const gitTimeoutMs = parsePositiveInteger(process.env.HELIOS_GIT_TIMEOUT_MS);
+  const mode = selectInteractiveMode({
+    hasMessage: cli.message !== undefined,
+    stdinIsTTY: stdin.isTTY,
+    stdoutIsTTY: stdout.isTTY,
+  });
+  // In TUI mode the rendered frame owns stdout, so Kernel logs are routed into the transcript.
+  const tuiLogger = mode === "tui" ? createTuiLogger() : undefined;
   let rl: ReturnType<typeof createInterface> | undefined;
   let interactive: InteractiveCli | undefined;
   const abort = new AbortController();
@@ -89,6 +108,7 @@ async function main(): Promise<void> {
       askQuestion,
       signal: abort.signal,
       gitTimeoutMs,
+      logger: tuiLogger,
     });
     const { bound } = runtime;
     const strategy = bound.binding.roots[0]?.strategy ?? "direct";
@@ -103,15 +123,18 @@ async function main(): Promise<void> {
     } else {
       stdout.write(`会话 id：${bound.session.id}（下次可用 --resume ${bound.session.id} 续聊）\n`);
     }
-    if (
-      selectInteractiveMode({
-        hasMessage: cli.message !== undefined,
-        stdinIsTTY: stdin.isTTY,
-        stdoutIsTTY: stdout.isTTY,
-      }) === "tui"
-    ) {
-      interactive = new InteractiveCli({ session: bound.session, view: new HeliosInteractiveView() });
+    if (mode === "tui") {
+      interactive = new InteractiveCli({
+        session: bound.session,
+        view: new HeliosInteractiveView(),
+        host: {
+          describeModel: () => describeManifestModel(declaredManifest),
+          resumeSession: async (sessionId) => (await runtime!.resumeSession(sessionId)).session,
+        },
+      });
+      const cliRef = interactive;
       await interactive.start();
+      tuiLogger?.attach((line) => cliRef.notice(line));
       await interactive.waitForExit();
       return;
     }
