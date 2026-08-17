@@ -70,33 +70,51 @@ CC/s08 的原则是"便宜的先跑，贵的后跑"；Reasonix 的原则是"单�
 
 分界条件：`B_warm < A ⟺ S + H_b < 10 × H_a`。长会话通常成立；反例是历史里净是被 `MESSAGE_CHAR_LIMIT=4000` 狠截的巨型 tool_result（H_b/H_a > 10），但那种情况 B 也过不了窗口检查。
 
-**路由规则：**
+**路由规则**（已落地为 `Session.canCompactInline`，B 为默认）：
 
 ```
-走 B ⟺ ① S + H_b + 输出预算 装得进窗口（否则必 PTL）
-     且 ② now - lastLlmCallAt < provider 缓存 TTL（Anthropic ephemeral 默认 5min；
+走 B ⟺ ① provider.caching !== "none"（没有前缀缓存，B 只是白发一份大 prompt）
+     且 ② now - lastLlmCallAt < cacheTtlMs（Anthropic ephemeral 默认 5min；
            自动缓存 provider 如 DeepSeek 硬盘缓存按小时算，可放宽）
-     且 ③ 本次调用禁用新断点
+     且 ③ S + H_b + 输出预算 ≤ compactInlineMaxTokens（否则必 PTL）
 否则走 A
 ```
 
-A 由此从"唯一路径"降级为"窗口不够或缓存已冷时的兜底"。
+A 由此从"唯一路径"降级为"窗口不够或缓存已冷时的兜底"。**B 失败不自动改走 A** —— 那等于为一次瞬时故障再全量付一次输入，交给第四节的失败路径即可。
 
-**③ 是实现层陷阱**：`applyCacheBreakpoints` 目前无条件执行。若压缩调用也走它，会为「整段历史 + 压缩指令」这个前缀**新写一份缓存**（1.25x 计费），而这份缓存**永远不会再被命中**（后续没人会再发这个前缀）。纯浪费，且是四种组合里最贵的。
+### 实测（2026-08-18，codexapis 网关 / gpt-5.4-mini，同一段 ~10k token 历史）
 
-**B 的两个风险与消除手段：**
+| 请求 | prompt | cached | tool_calls | 耗时 |
+|---|---|---|---|---|
+| 正常 turn（预热） | 10310 | 0 | Read | 8464ms |
+| B + `tool_choice:"none"` | 10403 | 10112（97%） | 无 | 7867ms |
+| B（仅 prompt 防呆） | 10403 | 10240（98%） | 无 | 4951ms |
+| A（原实现） | 9534 | 2816（30%） | 无 | 11812ms |
 
-1. tools 在场 → 模型可能调工具而非输出摘要。首选 `tool_choice: "none"`（禁止本次产生 tool_use，且**不改 tools 数组**故不砸缓存）；需先核实 `@anthropic-ai/sdk` 0.32 是否支持 `{type:"none"}`。不支持则退回 CC 的首尾双重防呆 prompt（`CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.`）。
-2. 主会话 system prompt（满是出码规则与工具指引）干扰摘要任务的指令跟随。**这条无法靠推理定，必须实测**：固定 3~5 个真实会话样本（长短各一、含大量工具调用的一个），A/B 对照三项 —— 是否出现 tool_use；摘要是否漏掉埋在样本里的关键约束；摘要长度是否稳定小于被折叠区间。
+两件事同时被证实：**追加到已有前缀之后确实命中缓存**（97~98% vs 30%），以及**仅靠 prompt 防呆就足以压住工具调用**（tools 原样在场也没产生 tool_call）。附带确认延迟减半。
+
+### ⚠️ 不要用 `tool_choice` 压工具调用
+
+Anthropic 缓存文档的失效表明确写着 **Tool choice → Messages cache ✘**（"Changes to `tool_choice` parameter only affect message blocks"），troubleshooting 一节也要求两次调用间保持 `tool_choice` 一致。只给压缩请求改这个参数，会让 messages 缓存整体失效 —— 正好把 B 要省的钱全砸掉。
+
+所以实现取**提示词首尾双重防呆**（`SUMMARIZE_INSTRUCTION` 开头与结尾各一句 "Respond with plain text only. Do not call any tool."），不动 `tool_choice`，也不动 tools 数组。
+
+### 原先担心的"③ 禁用新断点"是误判
+
+原文说 `applyCacheBreakpoints` 会为「整段历史 + 压缩指令」新写一份永不复用的缓存（1.25x）。实际不成立：Anthropic 按**增量**计 `cache_creation`（`total_input = cache_read + cache_creation + input_tokens`），且断点有 20-block 回看 —— 追加一条消息后，既有的 `length-2` 断点仍能命中前面全部缓存，新写入的只是那一条增量。**不需要任何新开关**，也无需在压缩请求里关掉断点。
+
+**剩下的一个风险（未实测）**：主会话 system prompt（满是出码规则与工具指引）可能干扰摘要任务的指令跟随。这条无法靠推理定，需要固定 3~5 个真实会话样本 A/B 对照：摘要是否漏掉埋在样本里的关键约束；摘要长度是否稳定小于被折叠区间。
 
 **B 的额外收益（超出成本本身）：**
 
 - **延迟**：命中缓存免 prefill，而长历史的 prefill 正是首 token 延迟的主要来源。压缩目前是 `await this.maybeCompact(runId)` 前台阻塞在 run 启动前，用户直接可感知。
 - **摘要质量更高**：现状 `compact-default` 的 `textOf()` 把 `tool_use` 压成 `[tool_use Bash]`（**参数全丢**）、`tool_result` 压成 `[tool_result]`（**整块丢**），再按每条 4000 字符截断 —— 摘要模型基本不知道 agent 做了什么。B 直接喂原始结构化 messages。
 
-**契约影响（待拍板）**：B 需要 `system + tools + 完整路径 + 断点开关 + 模型选择`，而 `CompactStrategyPort.compact(messages, runId)` 只给了 messages，这些 kernel 有、Port 一个都摸不到。两条路：(a) 扩 compact 参数带上只读 system/tools；(b) **把那次 `streamMessage` 挪回 kernel**，Port 只负责"给出压缩指令 prompt + 解析结果"。(b) 更干净，还能撤掉 Port 上那个只为上报 CostMeter 而存在的 `runId` 形参；代价是换成"用 embedding 做分层压缩"这类不需要 LLM 的实现时形状不合身。
+**契约影响（已拍板走 (b)）**：B 需要 `system + tools + 完整路径 + 模型选择`，而原 `CompactStrategyPort.compact(messages, runId)` 只给了 messages，这些 kernel 有、Port 一个都摸不到。曾考虑 (a) 扩 compact 参数带上只读 system/tools，最终取 (b)：**把那次 `streamMessage` 挪回 kernel**，Port 收缩为 `plan()`（纯函数，产出 `CompactPlan`）+ `parseSummary()`。顺带撤掉了 Port 上那个只为上报 CostMeter 而存在的 `runId` 形参。apiVersion 1 → 2。
 
-**顺带的成本缺口**：`compact-default` 调 `streamMessage` 时**没有选模型**（`model: ""`，不走 ModelRouter）。压缩是"输入巨大、输出结构化、不需要顶级推理"的任务，是降级到便宜模型的最佳场景，且已在上报 `purpose: "compaction"`，收益立刻可度量。接 `docs/cost-optimization-layer.md`。
+代价如实记录：换成"用 embedding 做分层压缩"这类不需要 LLM 的实现时形状不合身 —— 当前用 `CompactPlan.precomputed` 兜住（Port 自己算好摘要，kernel 一个请求都不发，`llm:false` 与空对话即走此路）。
+
+**顺带的成本缺口（已收口）**：原 `compact-default` 调 `streamMessage` 时没有选模型（`model: ""`）。现在 kernel 侧统一：B 沿用主会话模型（换模型 = 换缓存空间，必然全量 miss，故 B 不允许换），A 可经 `compactionLlmOptions` 降级到便宜模型。两条路线都上报 `purpose: "compaction"` 且 `model` 非空。接 `docs/cost-optimization-layer.md`。
 
 ---
 
@@ -196,7 +214,7 @@ compaction 必须知道树结构、切点、孤儿 `toolResult`、HEAD 移动 �
 分三层，**只做前两层**：
 
 - **Layer A（契约化，已有实现未写契约）**：`Usage` 的归一化口径（`uncachedInputTokens` / `cachedInputTokens` / `cacheWriteTokens` / `promptTokens`）目前只存在于实现里 —— `llm-anthropic` 映射 `cache_read`/`cache_creation`，`llm-openai` 填 `cacheWriteTokens: 0`。写进 `packages/ports/src/llm.ts` 契约注释 + 一个 provider 共享的 contract test。
-- **Layer B（新增只读字段，零行为变化）**：`readonly caching?: "manual" | "automatic" | "none"`。这是"命中率报表能否解读"的前提：automatic 模式下 `cacheWriteTokens` 恒为 0 只代表 provider 不上报，若报表当成"没付缓存写入成本"，anthropic 与 openai 两条数据就不可比；doctor 文案也需要它（automatic 模式下建议用户"去打断点"是错的）。
+- **Layer B（新增只读字段，零行为变化）✅ 已落地**：`LLMProvider.caching?: "manual" | "automatic" | "none"`（anthropic = manual，openai = automatic，缺省视为 automatic）。除了下面这条报表理由，它还是第三节路由条件 ① 的判据。这是"命中率报表能否解读"的前提：automatic 模式下 `cacheWriteTokens` 恒为 0 只代表 provider 不上报，若报表当成"没付缓存写入成本"，anthropic 与 openai 两条数据就不可比；doctor 文案也需要它（automatic 模式下建议用户"去打断点"是错的）。
 - **Layer C（延后）**：kernel 表达"缓存意图"、provider 翻译 —— 方向是**让 kernel 标注稳定边界**（只有 kernel 知道树/压缩语义），如 `LLMOptions` 上加 `cacheBoundaries?: { systemStable, lastStableMessageId }`，anthropic 翻成 ≤4 个 `cache_control`、openai 忽略。**现在不做**：只有一个 manual 实例，抽象没有第二个实例验证（对照 Port 试金石"有没有理由被换掉"）。下一个真实实例很可能根本套不进 breakpoint 模型 —— Gemini 的 explicit context caching 是"先 create cached content 拿 handle、后续请求引用 handle"，形态是**资源生命周期管理**。等三者里至少两个真接进来再抽。
 
 事实澄清（避免后人重复误判）：
@@ -206,6 +224,8 @@ compaction 必须知道树结构、切点、孤儿 `toolResult`、HEAD 移动 �
 - DeepSeek 自身口径是自动硬盘缓存、无手动控制。它同时提供 anthropic 兼容端点，字段层面可以把 `cache_control` 发过去，但缓存是否因此变成手动可控**无权威依据**（倾向接受并忽略）。**不要为了拿手动断点把 provider 从 openai 格式换成 anthropic 格式去打 DeepSeek。**
 - "前缀必须逐字节稳定"对**手动与自动缓存同等成立**（自动缓存也是逐字节前缀匹配）；手动断点只多给一件事：**决定在哪里付 cache-write、缓存多久**。因此 Reasonix 那份文档里可迁移的内容全在 kernel 侧。
 - helios `applyCacheBreakpoints` 每轮把断点打在倒数第二条 → 每轮写一次更长的新缓存（1.25x），这是手动模式的固有成本，自动缓存的 provider 没有这项。当前策略是标准做法，不改。
+- `cache_creation` 只计**增量**：`total_input_tokens = cache_read + cache_creation + input_tokens`，且断点有 20-block 回看。所以"往前缀后面追加内容"不会重付整段缓存写入，既有断点位置对追加场景已经正确。
+- **`tool_choice` 变化会让 messages 缓存整体失效**（tools 数组变化则连 tools 缓存一起失效）。任何"只在某类特殊请求上临时改 tool_choice"的想法都要先算这笔账。
 
 ---
 
@@ -222,14 +242,12 @@ compaction 必须知道树结构、切点、孤儿 `toolResult`、HEAD 移动 �
 
 - [#29](https://github.com/fujiwarazz/helios/issues/29) 压缩后没有原文尾巴（`coveredMessageIds` 覆盖全路径 → tail 恒空）。含三条路线对照（原文尾巴 / CC 后压缩恢复 / valos 只留路径提醒）+ 第一节的损益账。**待决策：选哪条路线**
 - [#30](https://github.com/fujiwarazz/helios/issues/30) 工具结果无长度上限（Read 无 offset/limit、Bash 输出无上限）→ 首次可见限长 + 落盘
-- [#31](https://github.com/fujiwarazz/helios/issues/31) 压缩调用改走主会话前缀命中缓存（第三节方案 B）。**待决策：`CompactStrategyPort` 契约是扩参数还是把调用挪回 kernel**
+- [#31](https://github.com/fujiwarazz/helios/issues/31) 压缩调用改走主会话前缀命中缓存（第三节方案 B）。**✅ 已完成**（契约取"把调用挪回 kernel"）
 - [#32](https://github.com/fujiwarazz/helios/issues/32) PTL reactive compact + 逐级降级兜底（含 `compactNow` 回调）
-- [#33](https://github.com/fujiwarazz/helios/issues/33) 压缩失败熔断 + 不装劣质节点（#32 依赖它的 `degraded` 契约）
-- [#34](https://github.com/fujiwarazz/helios/issues/34) 缓存命中率可观测：`Usage` 契约化 + `LLMProvider.caching` + CostReport/状态栏/doctor
+- [#33](https://github.com/fujiwarazz/helios/issues/33) 压缩失败熔断 + 不装劣质节点。**✅ 已完成**
+- [#34](https://github.com/fujiwarazz/helios/issues/34) 缓存命中率可观测：`Usage` 契约化 + CostReport/状态栏/doctor（`LLMProvider.caching` 字段已随 #31 落地）
 - 延后：异步压缩（排在 #31 之后，先量压缩实际耗时再决定）
 
 **实施计划**：`docs/plan-compact-contract-and-prefix-reuse.md`（覆盖 #31 + #33，含三阶段拆分、函数签名、测试清单）。
 
-**实施顺序**（以计划文档为准，已修正本节早先给的 `#33 → #31`）：#31 Phase 0（契约迁移，行为等价）→ #33（纯 kernel 失败语义）→ #31 Phase 2（B 路线）→ #29 → #30 → #32 → #34。改序原因：#33 若先做会引入一个被 #31 立刻删掉的 `Summary.degraded` 字段 —— 调用回到 kernel 后失败直接可见。
-
-⚠️ 本文第三节的「③ 本次调用禁用新断点」**待核实可能有误**：cache_creation 很可能只计"超出已缓存前缀的增量"，若如此则现有 `applyCacheBreakpoints`（打在 `length-2` = 历史最后一条）对 B 恰好正确，无需新增开关。见计划文档「事实 B」与 #31 的更正评论。
+**实施顺序**（以计划文档为准，已修正本节早先给的 `#33 → #31`）：~~#31 Phase 0（契约迁移，行为等价）→ #33（纯 kernel 失败语义）→ #31 Phase 2（B 路线）~~ 已完成 → #29 → #30 → #32 → #34。改序原因：#33 若先做会引入一个被 #31 立刻删掉的 `Summary.degraded` 字段 —— 调用回到 kernel 后失败直接可见。实际实现时 Phase 0 与 #33 并为一个提交：单独的 Phase 0 会留下一个失败路径严格更差的中间提交（异常穿透、`isCompacting` 卡死）。
