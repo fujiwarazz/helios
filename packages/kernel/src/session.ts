@@ -7,6 +7,7 @@ import type {
   LLMOptions,
   AskQuestionRequest,
   AskQuestionResponse,
+  CompactPlan,
   ConversationState,
   Runtime,
 } from "@helios/ports";
@@ -135,6 +136,13 @@ export class Session {
   private wasResumed = false;
   /** SessionStart handler 返回的 additionalContext，随 systemPrefix 一起冻结注入。 */
   private sessionStartContext: string | undefined;
+  /**
+   * 连续压缩失败次数。达 MAX_COMPACT_FAILURES 后停止自动压缩（会话继续跑），
+   * 成功一次或显式 `/compact` 归零。用户主动取消导致的失败不计入。
+   */
+  private compactFailures = 0;
+  /** 熔断上限：连续这么多次失败后不再自动发压缩请求，避免每 run 重复付费。 */
+  private static readonly MAX_COMPACT_FAILURES = 3;
   /**
    * Harness 组装的 Runtime 数组：构造时把已装配的 Cost-aware Port 粘合成 loop 认识的统一形状，
    * 一次组装、跨本会话全部 run 复用。Session 之后不再直接调用 modelRouter/costMeter/toolCache/
@@ -376,10 +384,8 @@ export class Session {
 
     this.emit({ type: "agent_start", runId });
 
-    // run 开始前：对当前路径按策略压缩（把 summary 作为真实节点追加到 HEAD 之下）。
-    await this.maybeCompact(runId);
-
     // 缓存纪律一：system 前缀（base + memory 召回 + SessionStart 注入）每会话只算一次并冻结，之后每 run 复用。
+    // 必须算在 maybeCompact 之前：压缩若走"复用主会话前缀"路线，需要拿到这份 system。
     if (this.systemPrefix === null) {
       const recalled = await ports.memory.recall(text);
       const parts = [this.opts.system];
@@ -388,6 +394,9 @@ export class Session {
       this.systemPrefix = parts.join("\n\n");
     }
     const system = this.systemPrefix;
+
+    // run 开始前：对当前路径按策略压缩（把 summary 作为真实节点追加到 HEAD 之下）。
+    await this.maybeCompact(runId);
 
     // 本 run 新增消息的起点：压缩后有效路径长度（compaction-safe，等价旧线性 history.length 切片）。
     const before = this.pathToHead().length;
@@ -478,8 +487,16 @@ export class Session {
    * 天然不受影响 —— 无需旁路记录、无需延迟回填的作用域锚点。旧节点一个不删仍可回溯。
    * summary 节点只装摘要文本，不含 system/tools（那是独立稳定前缀，复制进节点会砸 cache 且 token 翻倍）。
    * CompactStrategyPort 未加载时 shouldCompact 恒 false。
+   *
+   * 失败处理的核心原则是**失败时什么都不改写**：不装节点、不落盘、不移 HEAD。压缩失败的
+   * 典型原因（限流、网络、无 provider）都是瞬时的，而一个劣质摘要节点一旦进树就是祖先链的
+   * 一部分、还会成为下次压缩的输入 —— 用瞬时故障换永久信息损失是净亏。连续失败达上限后
+   * 停止自动压缩但**会话继续跑**（上下文继续增长的兜底另见 issue #32）。
+   *
+   * @param force 显式压缩（如 `/compact`）绕过熔断，否则熔断就是个静默死锁：
+   *   用户换了模型 / 网络恢复了，也没有任何办法让它再试。
    */
-  private async maybeCompact(runId: string): Promise<void> {
+  private async maybeCompact(runId: string, { force = false } = {}): Promise<void> {
     const path = this.pathToHead();
     if (path.length === 0) return;
     const { ports } = this.opts;
@@ -489,15 +506,68 @@ export class Session {
     };
     if (!ports.compact.shouldCompact(state)) return;
 
+    if (!force && this.compactFailures >= Session.MAX_COMPACT_FAILURES) {
+      // 熔断：不发请求（抽取式摘要几乎不降 token，重试只会每 run 重复付费）。
+      this.emit({
+        type: "compact_end",
+        summaryLength: 0,
+        remaining: path.length,
+        status: "blocked",
+        reason: `已连续 ${this.compactFailures} 次压缩失败，本会话暂停自动压缩`,
+      });
+      return;
+    }
+    if (force) this.compactFailures = 0;
+
+    const plan = ports.compact.plan(state);
+
     this.emit({ type: "compact_start", messageCount: path.length });
-    const summary = await ports.compact.compact([...path], runId);
-    const covered = new Set(summary.coveredMessageIds);
+
+    let summaryText: string;
+    try {
+      summaryText = await this.requestSummary(plan, state, runId);
+    } catch (err) {
+      // 异常绝不外抛：压缩是优化，失败不该让整轮 run 挂掉（历史上这里穿透出去会让
+      // 前端的 isCompacting 永久卡 true）。
+      const aborted = this.currentAbort?.signal.aborted ?? false;
+      const reason = err instanceof Error ? err.message : String(err);
+      if (aborted) {
+        // 用户主动取消：对齐 runTurnLoop 的"中断导致的流异常视为正常停止"约定，
+        // 不计入熔断 —— 否则几次手动停止就会让熔断在并非连续失败时提前触发。
+        this.emit({ type: "compact_end", summaryLength: 0, remaining: path.length, status: "skipped", reason });
+      } else {
+        this.compactFailures++;
+        this.opts.logger.warn(`压缩失败（第 ${this.compactFailures} 次），本次不改写历史：${reason}`);
+        this.emit({ type: "compact_end", summaryLength: 0, remaining: path.length, status: "failed", reason });
+      }
+      return;
+    }
+
+    if (summaryText === "") {
+      // 产物不可用（parseSummary 判定空/截断/不合格）：与调用失败同等对待，不装劣质节点。
+      this.compactFailures++;
+      this.emit({
+        type: "compact_end",
+        summaryLength: 0,
+        remaining: path.length,
+        status: "failed",
+        reason: "摘要产物为空或不可用",
+      });
+      return;
+    }
+
+    const covered = new Set(plan.coveredMessageIds);
 
     // 安全切点（含 Q1 吸附：首个保留节点绝不为 toolResult，杜绝孤儿 tool_result → Anthropic 400）。
     const lastCoveredIdx = snapCompactionCut(path, covered);
     if (lastCoveredIdx < 0) {
-      // 无可安全压缩（未覆盖任何节点，或吸附后退空）：空过。
-      this.emit({ type: "compact_end", summaryLength: summary.text.length, remaining: path.length });
+      // 无可安全压缩（未覆盖任何节点，或吸附后退空）：空过。这是正常状态，与 failed 区分开。
+      this.emit({
+        type: "compact_end",
+        summaryLength: summaryText.length,
+        remaining: path.length,
+        status: "skipped",
+      });
       return;
     }
 
@@ -505,19 +575,65 @@ export class Session {
     const summaryNode: Message = {
       id: uid("msg"),
       role: "user",
-      content: `<compacted_history>\n${summary.text}\n</compacted_history>`,
+      content: `<compacted_history>\n${summaryText}\n</compacted_history>`,
       compaction: { firstKeptId: tail[0]?.id ?? null },
     };
     this.appendNode(summaryNode); // parentId = 当前 HEAD，HEAD 前移到 summary
     // summary 不属于任何 turn 的 messages，必须自己落盘，否则 resume 后压缩视图丢失。
     await this.appendLog({ schemaVersion: 1, kind: "node", message: summaryNode });
     this.writtenNodeIds.add(summaryNode.id);
+    this.compactFailures = 0;
 
     this.emit({
       type: "compact_end",
-      summaryLength: summary.text.length,
+      summaryLength: summaryText.length,
       remaining: this.pathToHead().length,
+      status: "ok",
     });
+  }
+
+  /**
+   * 按计划取摘要文本。调用由 kernel 发而非 Port 自己发：复用主会话前缀需要 system/tools/
+   * 断点/模型，这些只有 kernel 有；顺带让计量回到 kernel 既有的分发点，Port 不必再收 runId。
+   *
+   * 开销上报 CostMeterPort 的 purpose:"compaction"：压缩恰好是把整段对话当输入的大调用，
+   * 只在长会话触发，漏记等于成本统计在最该准的时候偏低。
+   */
+  private async requestSummary(
+    plan: CompactPlan,
+    state: ConversationState,
+    runId: string,
+  ): Promise<string> {
+    // 预置产物（llm:false / 空对话）：不发任何请求。必须最先判断。
+    if (plan.precomputed !== undefined) return plan.precomputed;
+
+    const { ports } = this.opts;
+    const provider = ports.llm.get(this.opts.llmOptions.provider);
+    const request: Message = {
+      id: "compact-request",
+      role: "user",
+      content: plan.standalone.userText,
+    };
+    let out = "";
+    for await (const ev of provider.streamMessage([request], [], {
+      system: plan.standalone.system,
+      maxTokens: plan.maxTokens,
+      signal: this.currentAbort?.signal,
+    })) {
+      if (ev.type === "text-delta") out += ev.text;
+      // provider 把预期错误走 Result 通道（StreamEvent.error）而非 throw，这里必须显式识别，
+      // 否则会把"限流失败"当成"模型返回了空摘要"。
+      else if (ev.type === "error") throw new Error(ev.error);
+      else if (ev.type === "message-stop" && ev.usage) {
+        ports.costMeter.onLLMCall(runId, {
+          provider: provider.id,
+          model: "",
+          usage: ev.usage,
+          purpose: "compaction",
+        });
+      }
+    }
+    return ports.compact.parseSummary(out, state) ?? "";
   }
 
   /**

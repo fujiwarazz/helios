@@ -8,10 +8,6 @@ import type {
   PortRegistry,
   AgentMessage,
   Message,
-  LLMOptions,
-  LLMCallRecord,
-  StreamEvent,
-  Usage,
 } from "@helios/ports";
 import * as fsNode from "@helios/fs-node";
 import * as memoryFs from "@helios/memory-fs";
@@ -65,95 +61,57 @@ describe("@helios/compact-default", () => {
     { id: "m2", role: "assistant", content: [{ type: "text", text: "yo" }] },
   ];
 
-  it("按阈值触发，compact 覆盖全部消息 id", async () => {
+  const state = (msgs: Message[], approxTokens = 100) => ({ messages: msgs, approxTokens });
+
+  it("按阈值触发，plan 覆盖全部消息 id", () => {
     const compact = compactDefault.create(ctxFor(workDir, { threshold: 10 }));
-    expect(compact.shouldCompact({ messages: [], approxTokens: 100 })).toBe(true);
-    expect(compact.shouldCompact({ messages: [], approxTokens: 5 })).toBe(false);
-    const summary = await compact.compact(messages, "run-1");
-    expect(summary.coveredMessageIds).toEqual(["m1", "m2"]);
+    expect(compact.shouldCompact(state([], 100))).toBe(true);
+    expect(compact.shouldCompact(state([], 5))).toBe(false);
+    expect(compact.plan(state(messages)).coveredMessageIds).toEqual(["m1", "m2"]);
   });
 
-  it("无 LLM 可用时回落抽取式摘要，不抛错", async () => {
-    // ctxFor 只装了 fileSystem，ports.llm 为 undefined —— 模拟未配置 provider 的情况。
-    const compact = compactDefault.create(ctxFor(workDir));
-    const summary = await compact.compact(messages, "run-1");
-    expect(summary.text).toContain("对话摘要");
+  it("plan 产出两条路线：inline 只给指令，standalone 带摘要器 system 与对话正文", () => {
+    const plan = compactDefault.create(ctxFor(workDir)).plan(state(messages));
+    // inline 路线复用主会话前缀，因此指令里不该重复对话正文。
+    expect(plan.inlineInstruction).toContain("must be compressed into a checkpoint");
+    expect(plan.inlineInstruction).not.toContain("<conversation>");
+    expect(plan.standalone.system).toContain("Do not continue the conversation");
+    expect(plan.standalone.userText).toContain("<conversation>");
+    expect(plan.standalone.userText).toContain("user: hi");
+    expect(plan.maxTokens).toBeGreaterThan(0);
+    // 有 LLM 可用时不预置产物，交由 kernel 发请求。
+    expect(plan.precomputed).toBeUndefined();
   });
 
-  it("有 LLM 时产出模型摘要，且请求带摘要器 system 与对话正文", async () => {
-    const seen: LLMOptions[] = [];
+  it("plan 是纯函数：连调两次同值，且不触碰 ports.llm", () => {
     const ctx = ctxFor(workDir);
-    let request = "";
-    stubLlm(ctx, async function* (msgs, opts) {
-      seen.push(opts);
-      request = String(msgs[0]!.content);
-      yield { type: "text-delta", text: "## Goal\nship it" };
-    });
-    const summary = await compactDefault.create(ctx).compact(messages, "run-1");
-    expect(summary.text).toBe("## Goal\nship it");
-    expect(summary.coveredMessageIds).toEqual(["m1", "m2"]);
-    expect(seen[0]!.system).toContain("Do not continue the conversation");
-    expect(request).toContain("<conversation>");
-    expect(request).toContain("user: hi");
-  });
-
-  it("把压缩自身的 token 开销上报 CostMeter，标记 purpose=compaction", async () => {
-    const calls: { runId: string; rec: LLMCallRecord }[] = [];
-    const ctx = ctxFor(workDir);
-    const usage: Usage = {
-      uncachedInputTokens: 900,
-      cachedInputTokens: 0,
-      cacheWriteTokens: 0,
-      outputTokens: 40,
-    };
-    stubLlm(ctx, async function* () {
-      yield { type: "text-delta", text: "## Goal\nx" };
-      yield { type: "message-stop", stopReason: "end_turn", usage };
-    });
-    (ctx.ports as { costMeter: unknown }).costMeter = {
-      onLLMCall: (runId: string, rec: LLMCallRecord) => calls.push({ runId, rec }),
-    };
-    await compactDefault.create(ctx).compact(messages, "run-42");
-    expect(calls).toHaveLength(1);
-    expect(calls[0]!.runId).toBe("run-42");
-    expect(calls[0]!.rec.purpose).toBe("compaction");
-    expect(calls[0]!.rec.usage).toEqual(usage);
-  });
-
-  it("provider 走 Result 通道报错时回落抽取式摘要", async () => {
-    const ctx = ctxFor(workDir);
-    stubLlm(ctx, async function* () {
-      yield { type: "error", error: "rate limited", retryable: true };
-    });
-    const summary = await compactDefault.create(ctx).compact(messages, "run-1");
-    expect(summary.text).toContain("对话摘要");
-  });
-
-  it("options.llm=false 强制走抽取式，不碰 provider", async () => {
-    const ctx = ctxFor(workDir, { llm: false });
     (ctx.ports as { llm: unknown }).llm = {
       list: () => ["fake"],
       get: () => {
-        throw new Error("不应被调用");
+        throw new Error("plan() 不应触碰 ports.llm");
       },
     };
-    const summary = await compactDefault.create(ctx).compact(messages, "run-1");
-    expect(summary.text).toContain("对话摘要");
+    const compact = compactDefault.create(ctx);
+    const a = compact.plan(state(messages));
+    const b = compact.plan(state(messages));
+    expect(a).toEqual(b);
   });
 
-  /** 把一个假 provider 挂到 ctx.ports.llm 上，只需给出要吐的事件流。 */
-  function stubLlm(
-    ctx: KernelContext,
-    stream: (msgs: Message[], opts: LLMOptions) => AsyncGenerator<StreamEvent>,
-  ): void {
-    (ctx.ports as { llm: unknown }).llm = {
-      list: () => ["fake"],
-      get: () => ({
-        id: "fake",
-        streamMessage: (msgs: Message[], _tools: unknown[], opts: LLMOptions) => stream(msgs, opts),
-      }),
-    };
-  }
+  it("options.llm=false 时给出预置抽取式摘要（kernel 据此不发请求）", () => {
+    const plan = compactDefault.create(ctxFor(workDir, { llm: false })).plan(state(messages));
+    expect(plan.precomputed).toContain("对话摘要");
+  });
+
+  it("空对话同样预置产物，不让 kernel 白发一次请求", () => {
+    const plan = compactDefault.create(ctxFor(workDir)).plan(state([]));
+    expect(plan.precomputed).toBeDefined();
+  });
+
+  it("parseSummary：空白视为产物不可用（undefined），有内容则 trim 后返回", () => {
+    const compact = compactDefault.create(ctxFor(workDir));
+    expect(compact.parseSummary("   \n ", state(messages))).toBeUndefined();
+    expect(compact.parseSummary("  ## Goal\nship it  ", state(messages))).toBe("## Goal\nship it");
+  });
 });
 
 describe("@helios/teams-mailbox", () => {

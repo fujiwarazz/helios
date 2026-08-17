@@ -31,7 +31,22 @@ export type AgentEvent =
   /** LLM 调用命中可重试错误、即将 backoff 重试（issue #10）；供消费方感知"正在重试"、可选择丢弃上一次失败 attempt 的部分渲染。 */
   | { type: "llm_retry"; turnId: string; retryCount: number; delayMs: number; httpStatus?: number }
   | { type: "compact_start"; messageCount: number }
-  | { type: "compact_end"; summaryLength: number; remaining: number }
+  /**
+   * 压缩收尾。`status` 区分四种结局，消费端据此决定要不要提示用户：
+   * - `ok`：装了 summary 节点
+   * - `skipped`：无可安全压缩，或用户主动取消 —— 正常状态，不必提示
+   * - `failed`：摘要调用失败/产物不可用；本次**什么都没改写**，历史与缓存完好
+   * - `blocked`：已连续失败达上限，本会话暂停自动压缩（本次未发请求）
+   *
+   * 无论何种 status，消费端都必须复位"压缩进行中"的 UI 状态。
+   */
+  | {
+      type: "compact_end";
+      summaryLength: number;
+      remaining: number;
+      status: "ok" | "skipped" | "failed" | "blocked";
+      reason?: string;
+    }
   | { type: "rollback"; turnId: string; historyLength: number }
   | {
       type: "artifact_action";

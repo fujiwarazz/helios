@@ -219,12 +219,6 @@ export interface AgentMessage {
   ts: number;
 }
 
-/** compact 产物 */
-export interface Summary {
-  text: string;
-  coveredMessageIds: string[];
-}
-
 /** checkpoint 快照引用 */
 export interface Ref {
   kind: "git" | "fs" | string;
