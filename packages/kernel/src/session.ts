@@ -74,6 +74,27 @@ export interface SessionOptions {
   sleep?: (ms: number) => Promise<void>;
   /** 上下文预算可观测性阈值；不传则不检查。见 `agentLoop/contextBudget.ts`。 */
   contextBudgetWarnTokens?: number;
+  /**
+   * 压缩摘要调用的 provider/model 覆盖；不传则沿用主会话。压缩是"输入巨大、输出结构化、
+   * 不需要顶级推理"的任务，适合降级到便宜模型。
+   *
+   * ⚠️ 仅在 standalone 路线生效：inline 路线复用主会话前缀，换模型等于换缓存空间、必然全量 miss。
+   */
+  compactionLlmOptions?: Pick<LLMOptions, "provider" | "model">;
+  /**
+   * 走 inline 压缩（复用主会话前缀）的输入上限（近似 token）。超过则回落 standalone，
+   * 因为 inline 把完整路径 + system + tools 全发一遍，装不下会直接 prompt_too_long。
+   *
+   * 这是个占位上限：真正该用的是模型 contextWindow，但模型元数据/VersionProvider 尚未落地。
+   * 刻意不复用 `contextBudgetWarnTokens` —— 那是纯观测阈值，语义不同，借用会让两个概念纠缠。
+   */
+  compactInlineMaxTokens?: number;
+  /**
+   * 前缀缓存 TTL（毫秒）。距上次 LLM 调用超过它就认为缓存已冷 → 走 standalone：
+   * 缓存冷时 inline 把整段历史按未缓存价重付一遍，反而比 standalone 更贵。
+   * 缺省 5min，对齐 Anthropic ephemeral；自动缓存的 provider（DeepSeek 硬盘缓存按小时算）可放大。
+   */
+  cacheTtlMs?: number;
   beforeFirstRun?: (text: string) => Promise<void>;
   onRunStateChange?: (state: "running" | "idle" | "interrupted") => Promise<void>;
   recordEdit?: (edit: FileEditObservation) => Promise<ArtifactAction | void>;
@@ -143,6 +164,13 @@ export class Session {
   private compactFailures = 0;
   /** 熔断上限：连续这么多次失败后不再自动发压缩请求，避免每 run 重复付费。 */
   private static readonly MAX_COMPACT_FAILURES = 3;
+  /**
+   * 上次 LLM 调用的时刻，用于判断前缀缓存大概率是否还热（决定压缩走 inline 还是 standalone）。
+   * 在每次 run 收尾与压缩请求后更新：run 刚结束时它就是该 run 最后一次 LLM 调用的时间，
+   * 误差在秒级，足够支撑分钟级的 TTL 判断，无需为一个时间戳给 RunLoopDeps 加回调。
+   */
+  private lastLlmCallAt = 0;
+  private static readonly DEFAULT_CACHE_TTL_MS = 5 * 60_000;
   /**
    * Harness 组装的 Runtime 数组：构造时把已装配的 Cost-aware Port 粘合成 loop 认识的统一形状，
    * 一次组装、跨本会话全部 run 复用。Session 之后不再直接调用 modelRouter/costMeter/toolCache/
@@ -450,6 +478,9 @@ export class Session {
       pendingLeadMessages: [userMsg],
     });
 
+    // run 收尾即"最后一次 LLM 调用"的近似时刻，供下次压缩判断前缀缓存是否还热。
+    this.lastLlmCallAt = Date.now();
+
     // Bug 5：因达到 turn 上限（而非自然结束）退出 → 记录并在 agent_end 标注，避免静默截断。
     if (reachedMaxTurns) {
       logger.warn(`run ${runId} 达到 turn 上限 ${this.maxTurns}，提前结束`);
@@ -608,15 +639,31 @@ export class Session {
     if (plan.precomputed !== undefined) return plan.precomputed;
 
     const { ports } = this.opts;
-    const provider = ports.llm.get(this.opts.llmOptions.provider);
-    const request: Message = {
-      id: "compact-request",
-      role: "user",
-      content: plan.standalone.userText,
-    };
+    const inline = this.canCompactInline(plan, state);
+
+    // inline：主会话前缀（system + tools + 完整路径）+ 一条压缩指令。前缀与上一轮请求逐字节一致，
+    // 绝大部分输入命中缓存；且不改 tools 数组、不动 tool_choice —— 两者任一变化都会让 messages
+    // 缓存失效，等于把这条路线的收益砸光。
+    // standalone：独立小 system + 渲染后的对话 + 空 tools，零命中，仅作装不下/缓存已冷时的兜底。
+    const providerId = inline
+      ? this.opts.llmOptions.provider
+      : (this.opts.compactionLlmOptions?.provider ?? this.opts.llmOptions.provider);
+    const provider = ports.llm.get(providerId);
+    const model = inline
+      ? this.opts.llmOptions.model
+      : (this.opts.compactionLlmOptions?.model ?? this.opts.llmOptions.model);
+
+    const messages: Message[] = inline
+      ? [...state.messages, { id: "compact-request", role: "user", content: plan.inlineInstruction }]
+      : [{ id: "compact-request", role: "user", content: plan.standalone.userText }];
+    const tools = inline ? this.opts.tools.list() : [];
+    const system = inline ? (this.systemPrefix ?? this.opts.system) : plan.standalone.system;
+
     let out = "";
-    for await (const ev of provider.streamMessage([request], [], {
-      system: plan.standalone.system,
+    for await (const ev of provider.streamMessage(messages, tools, {
+      ...this.opts.llmOptions,
+      model,
+      system,
       maxTokens: plan.maxTokens,
       signal: this.currentAbort?.signal,
     })) {
@@ -627,13 +674,42 @@ export class Session {
       else if (ev.type === "message-stop" && ev.usage) {
         ports.costMeter.onLLMCall(runId, {
           provider: provider.id,
-          model: "",
+          model: model ?? "",
           usage: ev.usage,
           purpose: "compaction",
         });
       }
     }
+    this.lastLlmCallAt = Date.now();
     return ports.compact.parseSummary(out, state) ?? "";
+  }
+
+  /**
+   * 压缩请求能否复用主会话前缀。三个条件缺一不可，任一不满足就回落独立调用：
+   *
+   * 1. **装得下**：inline 会把完整路径 + system + tools 一起发出去，比 standalone 的截断渲染版更大；
+   *    压缩恰恰在"路径已经很大"时触发，装不下就是直接 prompt_too_long。
+   * 2. **缓存大概率还热**：冷缓存下 inline 把整段历史按未缓存价重付一遍，比 standalone 更贵。
+   * 3. **provider 有前缀缓存**：声明 `caching:"none"` 的实现走 inline 只会白发一份大 prompt。
+   */
+  private canCompactInline(plan: CompactPlan, state: ConversationState): boolean {
+    const provider = this.opts.ports.llm.get(this.opts.llmOptions.provider);
+    if (provider.caching === "none") return false;
+
+    // 用 >= 而非 >：到点即视为过期，且让 cacheTtlMs:0 成为"关掉 inline 路线"的明确写法。
+    const ttl = this.opts.cacheTtlMs ?? Session.DEFAULT_CACHE_TTL_MS;
+    if (Date.now() - this.lastLlmCallAt >= ttl) return false;
+
+    const limit = this.opts.compactInlineMaxTokens;
+    if (limit !== undefined) {
+      const system = this.systemPrefix ?? this.opts.system;
+      const overhead = approxTokens([
+        { id: "sys", role: "user", content: system },
+        { id: "tools", role: "user", content: JSON.stringify(this.opts.tools.list()) },
+      ]);
+      if (state.approxTokens + overhead + plan.maxTokens > limit) return false;
+    }
+    return true;
   }
 
   /**

@@ -85,6 +85,52 @@ describe("kernel 发起压缩调用", () => {
   });
 });
 
+describe("压缩选路：复用主会话前缀 vs 独立调用", () => {
+  /** 跑到触发一次成功压缩，返回 summary 节点文本（内含 route= 标记）。 */
+  async function summaryTextOf(opts: Parameters<Kernel["createSession"]>[0]): Promise<string> {
+    const kernel = new Kernel({ workDir, manifest: manifestViaLlm(), logger: silent });
+    await kernel.start();
+    const session = kernel.createSession(opts);
+    await session.sendMessage("第一条消息包含关键词FIRST");
+    await session.sendMessage("第二条消息");
+    const summary = session.getHistory().find((m) => textOf(m).includes("COMPACTED_VIA_LLM"));
+    return summary ? textOf(summary) : "";
+  }
+
+  it("缓存还热且装得下 → inline：历史与 tools 原样在请求里", async () => {
+    const text = await summaryTextOf({ askQuestion: noAsk });
+    expect(text).toContain("route=inline");
+  });
+
+  it("超过 compactInlineMaxTokens → 回落 standalone（inline 装不下就是 prompt_too_long）", async () => {
+    const text = await summaryTextOf({ askQuestion: noAsk, compactInlineMaxTokens: 1 });
+    expect(text).toContain("route=standalone");
+    // standalone 刻意不带 tools：独立调用不需要工具定义，白发一份是纯浪费。
+    expect(text).toContain("tools=0");
+  });
+
+  it("距上次 LLM 调用超过 cacheTtlMs → 回落 standalone（冷缓存下 inline 更贵）", async () => {
+    const text = await summaryTextOf({ askQuestion: noAsk, cacheTtlMs: 0 });
+    expect(text).toContain("route=standalone");
+  });
+
+  it("inline 失败不自动改走 standalone：直接进失败路径，不重复付一次全量输入", async () => {
+    process.env.HELIOS_TEST_COMPACT_MODE = "error";
+    const kernel = new Kernel({ workDir, manifest: manifestViaLlm(), logger: silent });
+    await kernel.start();
+    const session = kernel.createSession({ askQuestion: noAsk });
+    const events: AgentEvent[] = [];
+    session.on((e) => events.push(e));
+
+    await session.sendMessage("第一条");
+    await session.sendMessage("第二条");
+
+    // 一次 compact_start 对应恰好一次 compact_end(failed)：中间没有第二次调用。
+    expect(events.filter((e) => e.type === "compact_start")).toHaveLength(1);
+    expect(compactEnds(events).map((e) => e.status)).toEqual(["failed"]);
+  });
+});
+
 describe("压缩失败时什么都不改写", () => {
   it.each(["error", "throw", "empty"] as const)(
     "provider %s → 不装节点、不改历史，status=failed",
