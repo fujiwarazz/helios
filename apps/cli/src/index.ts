@@ -7,6 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import type { AgentEvent, Manifest } from "@helios/kernel";
 import type { AskQuestionRequest, AskQuestionResponse } from "@helios/ports";
+import { formatCostSummary } from "./costSummary";
 import { selectInteractiveMode } from "./interactiveMode";
 import { CliUsageError, parseCliOptions } from "./options";
 import { HeliosInteractiveView } from "./tui/heliosInteractiveView";
@@ -210,9 +211,12 @@ function render(event: AgentEvent): void {
     case "tool_execution_end":
       stdout.write(event.isError ? "  [失败]\n" : "  [完成]\n");
       break;
-    case "agent_end":
+    case "agent_end": {
       stdout.write("\n");
+      const cost = formatCostSummary(event.costReport);
+      if (cost) stdout.write(`  ${cost}\n`);
       break;
+    }
     default:
       break;
   }

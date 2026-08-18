@@ -32,6 +32,8 @@ interface RunAcc {
   outputTokens: number;
   contextLengthSum: number;
   llmCalls: number;
+  /** 命中过前缀缓存（cachedInputTokens > 0）的调用数，供按调用计的命中率。 */
+  llmCallsWithCachedInput: number;
   toolCalls: number;
   toolExecutions: number;
   toolCacheHits: number;
@@ -49,6 +51,7 @@ function emptyAcc(): RunAcc {
     outputTokens: 0,
     contextLengthSum: 0,
     llmCalls: 0,
+    llmCallsWithCachedInput: 0,
     toolCalls: 0,
     toolExecutions: 0,
     toolCacheHits: 0,
@@ -80,9 +83,13 @@ class DefaultCostMeter implements CostMeterPort {
     a.cachedInputTokens += u.cachedInputTokens;
     a.cacheWriteTokens += u.cacheWriteTokens;
     a.outputTokens += u.outputTokens;
-    // context length 用 provider 权威值，缺省 uncached+cached（不含 cacheWrite）。
-    a.contextLengthSum += u.promptTokens ?? u.uncachedInputTokens + u.cachedInputTokens;
+    // context length 用 provider 权威值；缺省把三个输入分项全部相加 —— cacheWrite 也是
+    // 发出去的 prompt（Anthropic: total_input = read + creation + input），漏掉它会让
+    // 首轮（整段历史都落在 cache_creation）的上下文长度算成一个很小的数。
+    a.contextLengthSum +=
+      u.promptTokens ?? u.uncachedInputTokens + u.cachedInputTokens + u.cacheWriteTokens;
     a.llmCalls += 1;
+    if (u.cachedInputTokens > 0) a.llmCallsWithCachedInput += 1;
 
     const price = this.opts.pricing?.[rec.model] ?? this.opts.pricing?.["*"];
     if (price) {
@@ -110,7 +117,8 @@ class DefaultCostMeter implements CostMeterPort {
 
   report(runId: string): TaskCostReport {
     const a = this.acc(runId);
-    const inputTotal = a.uncachedInputTokens + a.cachedInputTokens;
+    // 命中率的分母是"整个 prompt"，含按写入价计费的那部分。
+    const inputTotal = a.uncachedInputTokens + a.cachedInputTokens + a.cacheWriteTokens;
     return {
       runId,
       outcome: a.outcome,
@@ -118,13 +126,16 @@ class DefaultCostMeter implements CostMeterPort {
       cachedInputTokens: a.cachedInputTokens,
       cacheWriteTokens: a.cacheWriteTokens,
       outputTokens: a.outputTokens,
-      contextLength: inputTotal,
+      // 与 avgContextLength 同源：避免"总量"和"均值×次数"两个口径互相矛盾。
+      contextLength: a.contextLengthSum,
       llmCalls: a.llmCalls,
       toolCalls: a.toolCalls,
       toolExecutions: a.toolExecutions,
       toolCacheHits: a.toolCacheHits,
       avgContextLength: a.llmCalls > 0 ? a.contextLengthSum / a.llmCalls : 0,
-      prefixCacheHitRate: a.toolCalls > 0 ? a.toolCacheHits / a.toolCalls : undefined,
+      // 按调用计的前缀缓存命中率。原实现误算成 toolCacheHits/toolCalls（工具结果缓存，
+      // 与前缀缓存毫无关系，且那两个计数器本身已在报告里，纯属重复且误导）。
+      prefixCacheHitRate: a.llmCalls > 0 ? a.llmCallsWithCachedInput / a.llmCalls : undefined,
       cachedInputRatio: inputTotal > 0 ? a.cachedInputTokens / inputTotal : undefined,
       estimatedCost: a.hasPricing ? a.spent : undefined,
       pricingVersion: a.pricingVersion,

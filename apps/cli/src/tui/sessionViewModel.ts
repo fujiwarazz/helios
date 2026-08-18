@@ -1,5 +1,6 @@
 import type { AgentEvent } from "@helios/kernel";
 import type { Message, ToolRenderDescriptor } from "@helios/ports";
+import { formatCostSummary } from "../costSummary";
 
 export interface TranscriptMessage {
   id: string;
@@ -130,10 +131,14 @@ export class SessionViewModel {
       case "compact_end":
         this.status = "Ready";
         return;
-      case "agent_end":
+      case "agent_end": {
         this.busy = false;
         this.status = event.error ? `Error: ${event.error}` : "Completed";
+        // 成本行走 notice：它是本地 transcript 行，不进消息树、LLM 看不到。
+        const cost = formatCostSummary(event.costReport);
+        if (cost) this.notice(cost);
         return;
+      }
       default:
         return;
     }

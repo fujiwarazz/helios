@@ -81,6 +81,41 @@ describe("SessionViewModel", () => {
     });
   });
 
+  it("appends the cost summary as a local system notice on agent_end", () => {
+    const model = new SessionViewModel();
+    model.apply({ type: "agent_start", runId: "run-1" });
+    model.apply({
+      type: "agent_end",
+      runId: "run-1",
+      turnIds: ["turn-1"],
+      newMessages: [],
+      costReport: {
+        runId: "run-1",
+        uncachedInputTokens: 163,
+        cachedInputTokens: 10_240,
+        cacheWriteTokens: 0,
+        outputTokens: 412,
+        contextLength: 10_403,
+        llmCalls: 3,
+        toolCalls: 0,
+        toolExecutions: 0,
+        toolCacheHits: 0,
+        avgContextLength: 3468,
+        cachedInputRatio: 10_240 / 10_403,
+      },
+    });
+
+    const notices = model.snapshot().messages.filter((m) => m.role === "system");
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.text).toBe("↑ 10.4k (98% cached) · ↓ 412 · 3 calls");
+  });
+
+  it("omits the cost notice when no CostMeterPort is installed", () => {
+    const model = new SessionViewModel();
+    model.apply({ type: "agent_end", runId: "run-1", turnIds: [], newMessages: [] });
+    expect(model.snapshot().messages).toHaveLength(0);
+  });
+
   it("marks failed tools and failed runs as errors", () => {    const model = new SessionViewModel();
 
     model.apply({ type: "agent_start", runId: "run-1" });
