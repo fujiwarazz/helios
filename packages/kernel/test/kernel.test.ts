@@ -216,7 +216,11 @@ describe("PluginLoader —— 版本与 shape 校验", () => {
     const cap = capturingLogger();
     const kernel = new Kernel({ workDir, manifest, logger: cap.logger });
     await kernel.start();
-    expect(cap.errors.some((e) => /compact/.test(e))).toBe(true);
+    // 断言 Port 名 + 具体缺失的方法，而不是松散地匹配 /compact/：后者会命中日志里的
+    // fixture 绝对路径，于是「仓库目录名恰好含 compact」时无论实现对不对都能通过。
+    expect(
+      cap.errors.some((e) => /CompactStrategyPort 的实现缺少方法：plan\(\)/.test(e)),
+    ).toBe(true);
     const session = kernel.createSession({ askQuestion: noAsk });
     expect(await session.sendMessage("hi")).toHaveLength(2);
   });
