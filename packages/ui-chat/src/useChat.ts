@@ -89,8 +89,24 @@ export function reduce(
     case "compact_start":
       return { ...state, isCompacting: true };
 
-    case "compact_end":
-      return { ...state, isCompacting: false };
+    case "compact_end": {
+      // 任何结局都必须复位 isCompacting。failed/blocked 额外给一条 system 提示：
+      // 压缩失败时历史与缓存完好、会话可继续，但用户需要知道"上下文不再自动变短了"，
+      // 才有机会换模型 / 手动压缩 / 开新会话。skipped 是正常状态，不打扰。
+      if (event.status !== "failed" && event.status !== "blocked") {
+        return { ...state, isCompacting: false };
+      }
+      const detail = event.reason ? `：${event.reason}` : "";
+      const text =
+        event.status === "blocked"
+          ? `上下文压缩已暂停${detail}。会话可继续，但历史不再自动压缩。`
+          : `上下文压缩失败${detail}。历史未被改写，会话可继续。`;
+      return {
+        ...state,
+        isCompacting: false,
+        messages: appendErrorMessage(state.messages, `compact-${event.status}-${Date.now()}`, text),
+      };
+    }
 
     case "message_start": {
       if (state.messages.some((m) => m.id === event.messageId)) return state;
@@ -220,8 +236,8 @@ export function reduce(
       const messages = event.error
         ? appendErrorMessage(state.messages, `error-${event.runId}`, event.error)
         : state.messages;
-      // compact() 若抛错，maybeCompact() 内只 emit 了 compact_start（无 compact_end）就向上抛，
-      // isCompacting 会永久卡 true；agent_end 是该 run 的终态兜底，一并复位。
+      // 纵深防御：maybeCompact() 现在会吞掉压缩异常并保证 emit compact_end（带 status），
+      // 正常不会漏；但 agent_end 是该 run 的终态，仍一并复位 isCompacting 以防任何漏 emit 的路径。
       return { ...state, messages: markRunBoundaries(messages), isStreaming: false, isCompacting: false };
     }
 
@@ -429,10 +445,9 @@ export function useChat(client: IChatClient, opts: { renderTool?: RenderTool } =
         await client.sendMessage(t);
         return true;
       } catch (err) {
-        // sendMessage() 在 run 未优雅收尾前意外 throw（如非预期异常/连接中断/compact() 抛错——
-        // kernel 侧 maybeCompact() 无 try/catch，只 emit 了 compact_start 就直接向上抛，
-        // 不会有 agent_end 事件来兜底）：没有事件会来，isStreaming/isCompacting 都会永久卡在
-        // true，这里强制复位并给出提示。
+        // sendMessage() 在 run 未优雅收尾前意外 throw（非预期异常 / 连接中断）：没有事件会来，
+        // isStreaming/isCompacting 都会永久卡在 true，这里强制复位并给出提示。
+        // 注：压缩异常已不在此列——maybeCompact() 内部吞掉并 emit compact_end{status:"failed"}。
         const message = err instanceof Error ? err.message : String(err);
         setState((s) => ({
           ...s,

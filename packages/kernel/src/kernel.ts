@@ -71,6 +71,12 @@ export interface CreateSessionOptions {
    * `agentLoop/contextBudget.ts`。
    */
   contextBudgetWarnTokens?: number;
+  /** 压缩摘要调用的 provider/model 覆盖；仅在回落 standalone 路线时生效，见 Session。 */
+  compactionLlmOptions?: Pick<LLMOptions, "provider" | "model">;
+  /** 走 inline 压缩（复用主会话前缀）的输入上限（近似 token）；超过回落 standalone。 */
+  compactInlineMaxTokens?: number;
+  /** 前缀缓存 TTL（毫秒），超过则认为缓存已冷、压缩走 standalone；缺省 5min。 */
+  cacheTtlMs?: number;
   /** 首次 run 在写入用户消息和执行工具前调用；用于原子提交平台 SessionRecord。 */
   beforeFirstRun?: (text: string) => Promise<void>;
   /** 平台持久化 run 生命周期；一次多-turn run 只产生一对 running/终态。 */
@@ -234,6 +240,9 @@ export class Kernel {
       llmRetry: opts.llmRetry,
       sleep: opts.sleep,
       contextBudgetWarnTokens: opts.contextBudgetWarnTokens,
+      compactionLlmOptions: opts.compactionLlmOptions,
+      compactInlineMaxTokens: opts.compactInlineMaxTokens,
+      cacheTtlMs: opts.cacheTtlMs,
       beforeFirstRun: opts.beforeFirstRun,
       onRunStateChange: opts.onRunStateChange,
       recordEdit: opts.recordEdit,

@@ -34,6 +34,8 @@ interface OpenAIOptions {
  */
 class OpenAIProvider implements LLMProvider {
   readonly id = "openai";
+  /** OpenAI 及兼容网关自动缓存公共前缀，请求侧无断点可打（`prompt_cache_key` 只是路由提示）。 */
+  readonly caching = "automatic" as const;
   private readonly client: OpenAI;
   private readonly defaultModel: string;
 

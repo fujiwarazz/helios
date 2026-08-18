@@ -40,6 +40,8 @@ interface AnthropicOptions {
  */
 class AnthropicProvider implements LLMProvider {
   readonly id = "anthropic";
+  /** 断点由 applyCacheBreakpoints 在请求侧显式打（`cache_control`），不打则不缓存。 */
+  readonly caching = "manual" as const;
   private readonly client: Anthropic;
   private readonly defaultModel: string;
 

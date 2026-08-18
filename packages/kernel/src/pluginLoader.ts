@@ -85,7 +85,7 @@ const PORT_META: Record<PortName, PortMeta> = {
   },
   CompactStrategyPort: {
     apiVersion: COMPACT_STRATEGY_PORT_API_VERSION,
-    requiredMethods: ["shouldCompact", "compact"],
+    requiredMethods: ["shouldCompact", "plan", "parseSummary"],
     kind: "single",
     token: ICompactPort as ServiceToken<unknown>,
   },

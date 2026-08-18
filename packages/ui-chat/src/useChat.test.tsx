@@ -86,8 +86,39 @@ describe("useChat", () => {
     act(() => emit({ type: "compact_start", messageCount: 20 }));
     expect(result.current.isCompacting).toBe(true);
 
-    act(() => emit({ type: "compact_end", summaryLength: 42, remaining: 5 }));
+    act(() => emit({ type: "compact_end", summaryLength: 42, remaining: 5, status: "ok" }));
     expect(result.current.isCompacting).toBe(false);
+    expect(result.current.messages.some((m) => m.role === "system")).toBe(false);
+  });
+
+  it.each(["failed", "blocked"] as const)(
+    "compact_end status=%s 复位 isCompacting 并给出 system 提示",
+    (status) => {
+      const { client, emit } = makeMockClient();
+      const { result } = renderHook(() => useChat(client));
+
+      act(() => emit(runStart));
+      act(() => emit({ type: "compact_start", messageCount: 20 }));
+      act(() =>
+        emit({ type: "compact_end", summaryLength: 0, remaining: 20, status, reason: "rate limited" }),
+      );
+
+      expect(result.current.isCompacting).toBe(false);
+      const notice = result.current.messages.find((m) => m.role === "system");
+      expect(notice?.text).toContain("rate limited");
+    },
+  );
+
+  it("compact_end status=skipped 不打扰用户", () => {
+    const { client, emit } = makeMockClient();
+    const { result } = renderHook(() => useChat(client));
+
+    act(() => emit(runStart));
+    act(() => emit({ type: "compact_start", messageCount: 20 }));
+    act(() => emit({ type: "compact_end", summaryLength: 0, remaining: 20, status: "skipped" }));
+
+    expect(result.current.isCompacting).toBe(false);
+    expect(result.current.messages.some((m) => m.role === "system")).toBe(false);
   });
 
   it("agent_end 兜底复位 isCompacting（compact_start 后未收到 compact_end 就以 run 错误收尾）", () => {

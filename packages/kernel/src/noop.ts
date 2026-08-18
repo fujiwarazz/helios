@@ -4,13 +4,12 @@
 import type {
   MemoryPort,
   MultiAgentPort,
+  CompactPlan,
   CompactStrategyPort,
   CheckpointPort,
   MemoryEntry,
   AgentSpec,
   ConversationState,
-  Message,
-  Summary,
   Ref,
   Disposable,
   ModelRouterPort,
@@ -54,8 +53,18 @@ export const NoopCompact: CompactStrategyPort = {
   shouldCompact(_state: ConversationState): boolean {
     return false;
   },
-  async compact(_messages: Message[]): Promise<Summary> {
-    return { text: "", coveredMessageIds: [] };
+  // shouldCompact 恒 false，以下两个方法实际不会被调用；给出"空但合法"的产物以满足契约。
+  plan(_state: ConversationState): CompactPlan {
+    return {
+      coveredMessageIds: [],
+      maxTokens: 0,
+      inlineInstruction: "",
+      standalone: { system: "", userText: "" },
+      precomputed: "",
+    };
+  },
+  parseSummary(raw: string): string | undefined {
+    return raw.trim() || undefined;
   },
 };
 
