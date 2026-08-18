@@ -18,6 +18,14 @@ export interface ToolCardState {
   isError?: boolean;
   status: "pending" | "running" | "success" | "error";
   descriptor?: ToolRenderDescriptor;
+  /**
+   * Wall-clock stamps taken when the events arrive, not carried on the events themselves:
+   * `AgentEvent` is a cross-process protocol shared with the web/electron hosts, and a CLI-only
+   * elapsed-time display is not worth widening it. For a live run the view model observes both
+   * events within the same tick as the kernel emits them, so the difference is the real duration.
+   */
+  startedAt: number;
+  endedAt?: number;
 }
 
 export interface SessionViewState {
@@ -100,15 +108,18 @@ export class SessionViewModel {
           name: event.name,
           input: event.input,
           status: "running",
+          startedAt: Date.now(),
         });
         return;
       case "tool_execution_end": {
         const tool = this.tools.get(event.toolUseId);
+        const endedAt = Date.now();
         if (tool) {
           tool.output = event.output;
           tool.isError = event.isError;
           tool.status = event.isError ? "error" : "success";
           tool.descriptor = event.descriptor;
+          tool.endedAt = endedAt;
         } else {
           this.putTool({
             toolUseId: event.toolUseId,
@@ -118,6 +129,9 @@ export class SessionViewModel {
             isError: event.isError,
             status: event.isError ? "error" : "success",
             descriptor: event.descriptor,
+            // No start was ever seen, so report zero rather than inventing a duration.
+            startedAt: endedAt,
+            endedAt,
           });
         }
         return;
@@ -184,7 +198,8 @@ function contentToTranscript(content: Message["content"]): { text: string; think
   return { text: text.trimStart(), thinking };
 }
 
-function renderValue(value: unknown): string {
+/** Single source of truth for turning an unknown tool payload into displayable text. */
+export function renderValue(value: unknown): string {
   if (typeof value === "string") return value;
   try {
     const encoded = JSON.stringify(value);

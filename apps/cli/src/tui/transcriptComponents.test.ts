@@ -64,15 +64,28 @@ describe("TranscriptComponent", () => {
     expect(plain(expanded)).toContain("step one is long");
   });
 
-  it("keeps tool cards compact and reuses them across state changes", () => {
+  it("shows what a tool was called with and what it printed, reusing the same card", () => {
+    // This used to assert the opposite (input and output deliberately hidden), which left the card
+    // as a bare tool name and made it impossible to see what the agent actually did.
     const transcript = new TranscriptComponent();
     transcript.update(
-      state([], [{ toolUseId: "t1", name: "read", input: { path: "/secret.txt" }, status: "running" }]),
+      state(
+        [],
+        [
+          {
+            toolUseId: "t1",
+            name: "Bash",
+            input: { command: "git log --oneline -2" },
+            status: "running",
+            startedAt: 1_000,
+          },
+        ],
+      ),
     );
     const card = transcript.toolComponent("t1");
-    const running = plain(transcript.render(60));
-    expect(running).toContain("read");
-    expect(running).not.toContain("/secret.txt");
+    const running = plain(transcript.render(80));
+    expect(running).toContain("Bash");
+    expect(running).toContain("git log --oneline -2");
 
     transcript.update(
       state(
@@ -80,20 +93,112 @@ describe("TranscriptComponent", () => {
         [
           {
             toolUseId: "t1",
-            name: "read",
-            input: { path: "/secret.txt" },
-            output: "file body that must stay hidden",
+            name: "Bash",
+            input: { command: "git log --oneline -2" },
+            output: "deb0e38 merge\n592327d fix",
             status: "success",
-            descriptor: { label: "Read", status: "success", detail: "12 lines" },
+            startedAt: 1_000,
+            endedAt: 1_240,
           },
         ],
       ),
     );
-    const done = plain(transcript.render(60));
+    const done = plain(transcript.render(80));
     expect(transcript.toolComponent("t1")).toBe(card);
-    expect(done).toContain("Read");
-    expect(done).toContain("12 lines");
-    expect(done).not.toContain("file body that must stay hidden");
+    expect(done).toContain("deb0e38 merge");
+    expect(done).toContain("Took 240ms");
+  });
+
+  it("collapses long tool output to its tail until ctrl+o expands it", () => {
+    const transcript = new TranscriptComponent();
+    const output = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\n");
+    const tool = {
+      toolUseId: "t1",
+      name: "Bash",
+      input: { command: "seq 20" },
+      output,
+      status: "success" as const,
+      startedAt: 0,
+      endedAt: 100,
+    };
+
+    transcript.update(state([], [tool]));
+    const collapsed = plain(transcript.render(80));
+    expect(collapsed).toContain("line 20");
+    expect(collapsed).not.toContain("line 1\n");
+    expect(collapsed).toContain("8 earlier lines, ctrl+o to expand");
+
+    transcript.setToolOutputExpanded(true);
+    transcript.update(state([], [tool]));
+    const expanded = plain(transcript.render(80));
+    expect(expanded).toContain("line 1");
+    expect(expanded).not.toContain("earlier lines");
+  });
+
+  it("still shows the output of a failed tool", () => {
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state(
+        [],
+        [
+          {
+            toolUseId: "t1",
+            name: "Bash",
+            input: { command: "false" },
+            output: "exit status 1",
+            isError: true,
+            status: "error",
+            startedAt: 0,
+            endedAt: 5,
+          },
+        ],
+      ),
+    );
+
+    const text = plain(transcript.render(80));
+    expect(text).toContain("exit status 1");
+    expect(text).toContain("Took 5ms");
+  });
+
+  it("shows the pending indicator under the assistant label, at the transcript tail", () => {
+    // The label must be present from the start of the run: the spinner used to live outside the
+    // transcript, so `helios ›` only appeared once the first delta landed and looked like it lagged.
+    const transcript = new TranscriptComponent();
+    transcript.update(state([{ id: "u1", role: "user", text: "hi", thinking: "", complete: true }]));
+    transcript.setPending({ render: () => ["◐ waiting for model…"], invalidate: () => {} });
+
+    const lines = plain(transcript.render(60));
+    expect(lines).toContain("helios ›");
+    expect(lines).toContain("waiting for model…");
+    expect(lines.indexOf("helios ›")).toBeGreaterThan(lines.indexOf("hi"));
+    expect(lines.indexOf("helios ›")).toBeLessThan(lines.indexOf("waiting for model…"));
+
+    transcript.setPending(undefined);
+    expect(plain(transcript.render(60))).not.toContain("waiting for model…");
+  });
+
+  it("hides an assistant message that never produced text or reasoning", () => {
+    // A run that dies before any output (e.g. a 429) used to leave a bare `helios ›` label with
+    // nothing under it, while the actual error showed up as a separate system line.
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state([
+        { id: "a1", role: "assistant", text: "", thinking: "", complete: true },
+        { id: "s1", role: "system", text: "[error] 429 Rate limit exceeded", thinking: "", complete: true },
+      ]),
+    );
+
+    const lines = plain(transcript.render(60));
+    expect(lines).not.toContain("helios ›");
+    expect(lines).toContain("429 Rate limit exceeded");
+  });
+
+  it("shows the assistant label as soon as reasoning arrives, before any answer text", () => {
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state([{ id: "a1", role: "assistant", text: "", thinking: "weighing options", complete: false }]),
+    );
+    expect(plain(transcript.render(60))).toContain("helios ›");
   });
 
   it("drops components for messages removed by /clear or a branch switch", () => {

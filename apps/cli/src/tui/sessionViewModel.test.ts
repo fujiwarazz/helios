@@ -64,7 +64,9 @@ describe("SessionViewModel", () => {
     });
     model.apply({ type: "agent_end", runId: "run-1", turnIds: ["turn-1"], newMessages: [] });
 
-    expect(model.snapshot()).toEqual({
+    // toMatchObject rather than toEqual: the card also carries wall-clock timestamps, which have no
+    // fixed value to assert here (they get their own case below).
+    expect(model.snapshot()).toMatchObject({
       busy: false,
       status: "Completed",
       messages: [],
@@ -79,6 +81,25 @@ describe("SessionViewModel", () => {
         },
       ],
     });
+  });
+
+  it("stamps tool start and end so the card can show how long it took", () => {
+    const model = new SessionViewModel();
+    model.apply({ type: "agent_start", runId: "run-1" });
+    model.apply({ type: "tool_execution_start", toolUseId: "t1", name: "Bash", input: {} });
+    model.apply({ type: "tool_execution_end", toolUseId: "t1", output: "", isError: false });
+
+    const tool = model.snapshot().tools[0]!;
+    expect(typeof tool.startedAt).toBe("number");
+    expect(tool.endedAt).toBeGreaterThanOrEqual(tool.startedAt);
+  });
+
+  it("reports zero elapsed for a tool whose start was never observed", () => {
+    const model = new SessionViewModel();
+    model.apply({ type: "tool_execution_end", toolUseId: "t1", output: "ok", isError: false });
+
+    const tool = model.snapshot().tools[0]!;
+    expect(tool.endedAt).toBe(tool.startedAt);
   });
 
   it("appends the cost summary as a local system notice on agent_end", () => {
