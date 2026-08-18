@@ -14,7 +14,7 @@ const usage = (u: Partial<Usage>): Usage => ({
 });
 
 describe("costmeter-default 计量累加与报告", () => {
-  it("累加 token 并区分 uncached/cached/write/output；contextLength 不含 write", () => {
+  it("累加 token 并区分 uncached/cached/write/output；contextLength 含 write", () => {
     const m = meter();
     m.onLLMCall("r1", {
       provider: "p",
@@ -26,19 +26,52 @@ describe("costmeter-default 计量累加与报告", () => {
     expect(rep.cachedInputTokens).toBe(40);
     expect(rep.cacheWriteTokens).toBe(10);
     expect(rep.outputTokens).toBe(20);
-    expect(rep.contextLength).toBe(140); // uncached + cached，不含 write
+    // cacheWrite 也是发出去的 prompt（Anthropic: total_input = read + creation + input）。
+    expect(rep.contextLength).toBe(150);
     expect(rep.llmCalls).toBe(1);
   });
 
-  it("promptTokens 存在时 contextLength 用权威值；avgContextLength 按调用平均", () => {
+  it("首轮全部落在 cache_creation 时，上下文长度不被算小（回归 anthropic 口径）", () => {
+    // Anthropic 会话首轮：cache_read=0、整段历史进 cache_creation、input_tokens 只剩尾巴。
+    // 旧实现 contextLength = uncached + cached = 120，把 10k 的上下文报成 120。
+    const m = meter();
+    m.onLLMCall("r1", {
+      provider: "anthropic",
+      model: "x",
+      usage: usage({ uncachedInputTokens: 120, cachedInputTokens: 0, cacheWriteTokens: 10_000 }),
+    });
+    const rep = m.report("r1");
+    expect(rep.contextLength).toBe(10_120);
+    expect(rep.avgContextLength).toBe(10_120);
+    // 一个字节都没读到缓存 → 两个比率都必须是 0，不能因为分母漏了 write 而虚高。
+    expect(rep.prefixCacheHitRate).toBe(0);
+    expect(rep.cachedInputRatio).toBe(0);
+  });
+
+  it("promptTokens 存在时用权威值；contextLength 是总和，avgContextLength 按调用平均", () => {
     const m = meter();
     m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 10, cachedInputTokens: 5, promptTokens: 200 }) });
     m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 10, cachedInputTokens: 5, promptTokens: 100 }) });
     const rep = m.report("r1");
-    expect(rep.avgContextLength).toBe(150); // (200 + 100) / 2
+    expect(rep.contextLength).toBe(300); // 200 + 100，权威值优先
+    expect(rep.avgContextLength).toBe(150);
   });
 
-  it("工具三指标分开 + prefixCacheHitRate + cachedInputRatio", () => {
+  it("prefixCacheHitRate 按 LLM 调用计，与工具结果缓存无关", () => {
+    const m = meter();
+    // 三次调用，只有第二次命中前缀缓存。
+    m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 100 }) });
+    m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 10, cachedInputTokens: 90 }) });
+    m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 100 }) });
+    // 工具侧刻意给一组完全不同的比例，证明两者不再串。
+    m.onToolCall("r1", { name: "a", cacheHit: true, executed: false });
+    m.onToolCall("r1", { name: "b", cacheHit: true, executed: false });
+    const rep = m.report("r1");
+    expect(rep.prefixCacheHitRate).toBeCloseTo(1 / 3);
+    expect(rep.toolCacheHits / rep.toolCalls).toBe(1); // 工具那笔账仍可单独算
+  });
+
+  it("工具三指标分开 + cachedInputRatio 按 token 计", () => {
     const m = meter();
     m.onLLMCall("r1", { provider: "p", model: "x", usage: usage({ uncachedInputTokens: 30, cachedInputTokens: 70 }) });
     m.onToolCall("r1", { name: "a", cacheHit: false, executed: true });
@@ -48,7 +81,6 @@ describe("costmeter-default 计量累加与报告", () => {
     expect(rep.toolCalls).toBe(3);
     expect(rep.toolExecutions).toBe(1);
     expect(rep.toolCacheHits).toBe(1);
-    expect(rep.prefixCacheHitRate).toBeCloseTo(1 / 3);
     expect(rep.cachedInputRatio).toBeCloseTo(0.7); // 70 / (30+70)
   });
 

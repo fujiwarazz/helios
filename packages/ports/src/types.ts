@@ -145,10 +145,21 @@ export interface Usage {
   uncachedInputTokens: number;
   /** 命中缓存的输入（cache read，读价更低）。 */
   cachedInputTokens: number;
-  /** 写缓存（cache creation，是缓存生命周期事件，不计入 context length）。 */
+  /**
+   * 写缓存（cache creation）。**这是 prompt 的一部分**，只是按缓存写入价计费 ——
+   * Anthropic 的口径是 `total_input = cache_read + cache_creation + input_tokens`，
+   * 三者互不重叠。所以估算 context length 时必须把它加上，否则会话首轮
+   * （cache_read=0、整段历史全落在 cache_creation）算出来的上下文会严重偏小。
+   */
   cacheWriteTokens: number;
   outputTokens: number;
-  /** provider 明确给出的实际 prompt token 数（权威值）；不给时 contextLength ≈ uncached + cached。 */
+  /**
+   * provider 明确给出的实际 prompt token 数（权威值）；不给时按
+   * `uncached + cached + cacheWrite` 估算。
+   *
+   * 只有部分 provider 提供：`llm-openai` 填 `prompt_tokens`，`llm-anthropic` 不填
+   * （Anthropic 不返回单一总数，需由三个分项相加）。
+   */
   promptTokens?: number;
 }
 

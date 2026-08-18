@@ -34,16 +34,34 @@ export interface TaskCostReport {
   cachedInputTokens: number;
   cacheWriteTokens: number;
   outputTokens: number;
-  contextLength: number; // = promptTokens ?? (uncached + cached)，不含 cacheWrite
+  /**
+   * 本 run 全部 LLM 调用的 prompt token 总和（**不是**最后一次调用的上下文长度）。
+   * 单次取 `promptTokens ?? (uncached + cached + cacheWrite)`；关心"上下文涨到多大"
+   * 应看 `avgContextLength`。
+   */
+  contextLength: number;
   llmCalls: number;
   // 工具三指标分开：否则 toolCalls↓ 分不清是 agent 少调还是 cache 挡掉
   toolCalls: number; // agent 发起的工具请求数
   toolExecutions: number; // 真正执行次数
   toolCacheHits: number; // 缓存命中次数（toolCalls = executions + cacheHits）
-  avgContextLength: number;
-  // Context 层 ↔ Cost 层的桥：证明 Context Reuse → cache↑ → Cost/Task↓
-  prefixCacheHitRate?: number; // 命中缓存的输入调用占比
-  cachedInputRatio?: number; // cachedInput / (uncached + cached)
+  avgContextLength: number; // contextLength / llmCalls
+  // Context 层 ↔ Cost 层的桥：证明 Context Reuse → cache↑ → Cost/Task↓。
+  // 两个比率是不同的问题，都要看：
+  /**
+   * **按调用计**：有多少比例的 LLM 调用命中了前缀缓存（`cachedInputTokens > 0`）。
+   * 回答"缓存是不是经常整体失效"—— 一次前缀漂移会让这个数直接掉下来，而
+   * `cachedInputRatio` 可能因为其余调用命中良好而看不出异常。
+   *
+   * ⚠️ 与工具结果缓存无关。工具那笔账看 `toolCacheHits / toolCalls`。
+   */
+  prefixCacheHitRate?: number;
+  /**
+   * **按 token 计**：`cachedInput / (uncached + cached + cacheWrite)`，即 prompt 里
+   * 有多大比例是按便宜的缓存读价拿到的。分母含 cacheWrite —— 那部分同样是发出去的
+   * prompt，只是按写入价计费，漏掉它会把命中率算高。
+   */
+  cachedInputRatio?: number;
   estimatedCost?: number; // 由可选价格表算出
   pricingVersion?: string;
 }
