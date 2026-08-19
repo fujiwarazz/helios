@@ -33,6 +33,15 @@ export interface SessionViewState {
   status: string;
   messages: readonly TranscriptMessage[];
   tools: readonly ToolCardState[];
+  /**
+   * Token/cache/cost readout for the most recent completed run, rendered on its own fixed line at
+   * the bottom of the screen.
+   *
+   * Deliberately not a transcript entry: it is a meter reading, not something anyone said. Routing
+   * it through `notice()` made it a `role: "system"` message, which stamped a meaningless `· ›`
+   * label on it and let it scroll away with the conversation.
+   */
+  costSummary?: string;
 }
 
 export class SessionViewModel {
@@ -43,6 +52,7 @@ export class SessionViewModel {
   private busy = false;
   private status = "Ready";
   private noticeCount = 0;
+  private costSummary?: string;
 
   hydrate(history: readonly Message[]): void {
     this.reset();
@@ -61,6 +71,8 @@ export class SessionViewModel {
     this.messageOrder.length = 0;
     this.tools.clear();
     this.toolOrder.length = 0;
+    // The reading belongs to the runs we just dropped from view.
+    this.costSummary = undefined;
   }
 
   /** Local, LLM-invisible transcript line (command output, resume/branch reports). */
@@ -148,9 +160,9 @@ export class SessionViewModel {
       case "agent_end": {
         this.busy = false;
         this.status = event.error ? `Error: ${event.error}` : "Completed";
-        // 成本行走 notice：它是本地 transcript 行，不进消息树、LLM 看不到。
-        const cost = formatCostSummary(event.costReport);
-        if (cost) this.notice(cost);
+        // Kept as a separate field, not a transcript notice: see SessionViewState.costSummary.
+        // Left in place when a run reports nothing, so the last real reading stays on screen.
+        this.costSummary = formatCostSummary(event.costReport) ?? this.costSummary;
         return;
       }
       default:
@@ -164,6 +176,7 @@ export class SessionViewModel {
       status: this.status,
       messages: this.messageOrder.map((id) => ({ ...this.messages.get(id)! })),
       tools: this.toolOrder.map((id) => ({ ...this.tools.get(id)! })),
+      costSummary: this.costSummary,
     };
   }
 

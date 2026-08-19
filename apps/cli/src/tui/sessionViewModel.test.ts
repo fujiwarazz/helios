@@ -102,20 +102,18 @@ describe("SessionViewModel", () => {
     expect(tool.endedAt).toBe(tool.startedAt);
   });
 
-  it("appends the cost summary as a local system notice on agent_end", () => {
-    const model = new SessionViewModel();
-    model.apply({ type: "agent_start", runId: "run-1" });
+  function endRun(model: SessionViewModel, runId: string, outputTokens: number): void {
     model.apply({
       type: "agent_end",
-      runId: "run-1",
+      runId,
       turnIds: ["turn-1"],
       newMessages: [],
       costReport: {
-        runId: "run-1",
+        runId,
         uncachedInputTokens: 163,
         cachedInputTokens: 10_240,
         cacheWriteTokens: 0,
-        outputTokens: 412,
+        outputTokens,
         contextLength: 10_403,
         llmCalls: 3,
         toolCalls: 0,
@@ -125,16 +123,40 @@ describe("SessionViewModel", () => {
         cachedInputRatio: 10_240 / 10_403,
       },
     });
+  }
 
-    const notices = model.snapshot().messages.filter((m) => m.role === "system");
-    expect(notices).toHaveLength(1);
-    expect(notices[0]?.text).toBe("↑ 10.4k (98% cached) · ↓ 412 · 3 calls");
+  it("reports the cost summary as its own field, not a transcript message", () => {
+    // It used to go through notice(), which made it a role:"system" message: that stamped a
+    // meaningless `· ›` label on a meter reading and let it scroll away with the conversation.
+    const model = new SessionViewModel();
+    model.apply({ type: "agent_start", runId: "run-1" });
+    endRun(model, "run-1", 412);
+
+    const snapshot = model.snapshot();
+    expect(snapshot.costSummary).toBe("↑ 10.4k (98% cached) · ↓ 412 · 3 calls");
+    expect(snapshot.messages).toHaveLength(0);
   });
 
-  it("omits the cost notice when no CostMeterPort is installed", () => {
+  it("replaces the reading on the next run rather than accumulating lines", () => {
     const model = new SessionViewModel();
-    model.apply({ type: "agent_end", runId: "run-1", turnIds: [], newMessages: [] });
-    expect(model.snapshot().messages).toHaveLength(0);
+    endRun(model, "run-1", 412);
+    endRun(model, "run-2", 7);
+    expect(model.snapshot().costSummary).toContain("↓ 7");
+  });
+
+  it("keeps the last reading when a run reports nothing", () => {
+    const model = new SessionViewModel();
+    endRun(model, "run-1", 412);
+    model.apply({ type: "agent_end", runId: "run-2", turnIds: [], newMessages: [] });
+    expect(model.snapshot().costSummary).toContain("↓ 412");
+  });
+
+  it("has no reading before any run, and drops it when the transcript is cleared", () => {
+    const model = new SessionViewModel();
+    expect(model.snapshot().costSummary).toBeUndefined();
+    endRun(model, "run-1", 412);
+    model.reset();
+    expect(model.snapshot().costSummary).toBeUndefined();
   });
 
   it("marks failed tools and failed runs as errors", () => {    const model = new SessionViewModel();

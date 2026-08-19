@@ -30,6 +30,7 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
   private readonly ui: TUI;
   private readonly document = new Container();
   private readonly transcript = new TranscriptComponent();
+  private readonly costLine = new Text("", 1, 0);
   private readonly status = new Text("", 1, 0);
   private readonly editor: Editor;
   private loader?: Loader;
@@ -53,6 +54,9 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
     this.document.addChild(new Text(palette.accent("helios"), 1, 0));
     this.document.addChild(this.transcript);
     this.document.addChild(new Spacer(1));
+    // Above the status line and below the transcript: a meter reading that stays put instead of
+    // scrolling away with the conversation.
+    this.document.addChild(this.costLine);
     this.document.addChild(this.status);
     this.document.addChild(this.editor);
     this.ui.addChild(this.document);
@@ -130,6 +134,7 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
     this.state = state;
     this.transcript.update(state);
     this.setLoading(state.busy && !hasVisibleOutput(state));
+    this.costLine.setText(state.costSummary ? palette.muted(state.costSummary) : "");
     const label = state.busy ? palette.accent(state.status) : palette.muted(state.status);
     this.status.setText(`${label}  ${palette.muted(HINT)}`);
     this.ui.requestRender();
