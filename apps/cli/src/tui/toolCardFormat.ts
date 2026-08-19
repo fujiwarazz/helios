@@ -17,13 +17,18 @@ const PRIMARY_ARGUMENT: Record<string, readonly string[]> = {
   Grep: ["pattern"],
   WebFetch: ["url"],
   Task: ["description"],
-  AskUserQuestion: ["question"],
+  // AskUserQuestion is deliberately absent: the question is already rendered in full by the prompt
+  // panel below the transcript, and echoing it in the card showed the same sentence twice.
+  AskUserQuestion: [],
 };
 
 /** One-line summary of what a tool was invoked with. Width is handled by the renderer. */
 export function formatToolInput(name: string, input: unknown): string {
   if (input === undefined || input === null) return "";
   const fields = PRIMARY_ARGUMENT[name];
+  // An explicitly empty field list means "this tool's input is not worth echoing", so it must not
+  // fall through to the JSON dump below.
+  if (fields?.length === 0) return "";
   if (fields && typeof input === "object") {
     const record = input as Record<string, unknown>;
     for (const field of fields) {

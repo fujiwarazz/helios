@@ -19,15 +19,11 @@ const MAX_VISIBLE_OPTIONS = 8;
  * free-text input.
  *
  * **Why this is a Focusable root rather than a plain `Box`.** The TUI dispatches keys to
- * `focusedComponent.handleInput`, and `showOverlay()` focuses the root it is handed. A `Box`/
- * `Container` has no `handleInput`, so focusing one drops every keystroke — that is what made the
- * question unanswerable and hung the tool call. Focusing the inner `SelectList` instead does not
- * work either: while an overlay is eligible for focus restore the TUI pulls focus back to the
- * overlay root, so the inner component loses it again on the next event. Hence the root is
- * focusable and forwards input to whichever child is currently active.
- *
- * Keeping the root focused also means `OverlayHandle.hide()` restores the previous focus (the
- * editor) on its own, since its restore condition is `focusedComponent === ` the overlay root.
+ * `focusedComponent.handleInput`. A `Box`/`Container` has no `handleInput`, so focusing one drops
+ * every keystroke — that is what made the question unanswerable and hung the tool call. Focusing
+ * the inner `SelectList` instead is not a fix either: the active child is swapped when the user
+ * picks 「其他」, so focus has to live somewhere stable. Hence the root is focusable and forwards
+ * input to whichever child is currently active.
  */
 export class QuestionOverlay implements Component, Focusable {
   /** Called exactly once with the chosen/typed answers, or an empty array when cancelled. */

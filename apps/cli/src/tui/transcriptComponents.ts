@@ -5,10 +5,14 @@ import { formatElapsed, formatToolInput, formatToolOutput } from "./toolCardForm
 
 const THINKING_PREVIEW_CHARS = 96;
 
-const ROLE_LABEL: Record<TranscriptMessage["role"], string> = {
+/**
+ * `system` has no label on purpose. It carries notices and errors, which already say what they are
+ * (`[error] …`); a bare `· ›` above them read as a broken or unnamed speaker.
+ */
+const ROLE_LABEL: Record<TranscriptMessage["role"], string | undefined> = {
   user: "you",
   assistant: "helios",
-  system: "·",
+  system: undefined,
   toolResult: "tool",
 };
 
@@ -32,10 +36,13 @@ export class MessageComponent {
 
   constructor(private readonly role: TranscriptMessage["role"]) {
     this.body = new Markdown("", 1, 0, HELIOS_MARKDOWN_THEME);
+    const label = ROLE_LABEL[this.role];
     this.container.addChild(new Spacer(1));
-    this.container.addChild(this.header);
+    if (label !== undefined) {
+      this.header.setText(ROLE_STYLE[this.role](`${label} ›`));
+      this.container.addChild(this.header);
+    }
     this.container.addChild(this.body);
-    this.header.setText(ROLE_STYLE[this.role](`${ROLE_LABEL[this.role]} ›`));
   }
 
   update(message: TranscriptMessage, thinkingExpanded: boolean): void {
@@ -60,8 +67,9 @@ export class MessageComponent {
   private attachThinking(): void {
     if (this.thinkingAttached) return;
     this.thinkingAttached = true;
-    // Keep reasoning above the answer so streamed text stays anchored at the bottom.
-    this.container.children.splice(2, 0, this.thinking);
+    // Keep reasoning above the answer so streamed text stays anchored at the bottom. Indexed off
+    // the body rather than a literal, because roles without a label have one child fewer.
+    this.container.children.splice(this.container.children.indexOf(this.body), 0, this.thinking);
   }
 
   private detachThinking(): void {
@@ -270,9 +278,22 @@ function statusIcon(status: ToolCardState["status"]): string {
   return palette.accent("◐");
 }
 
+/**
+ * The collapsed preview is plain `Text`, not Markdown, so emphasis markers would show up literally
+ * — reasoning that starts with `**Preparing…**` rendered as exactly that. Only inline markers are
+ * stripped; the expanded view keeps the reasoning verbatim.
+ */
+function stripInlineMarkdown(text: string): string {
+  return text
+    .replace(/`+/g, "")
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
+    .replace(/_{2}([^_]+)_{2}/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "");
+}
+
 function formatThinking(thinking: string, expanded: boolean): string {
   if (expanded) return `thinking\n${thinking}`;
-  const collapsed = thinking.replace(/\s+/g, " ").trim();
+  const collapsed = stripInlineMarkdown(thinking).replace(/\s+/g, " ").trim();
   const preview =
     collapsed.length > THINKING_PREVIEW_CHARS
       ? `…${collapsed.slice(-THINKING_PREVIEW_CHARS)}`
