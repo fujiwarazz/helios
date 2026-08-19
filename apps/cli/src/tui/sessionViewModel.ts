@@ -18,23 +18,52 @@ export interface ToolCardState {
   isError?: boolean;
   status: "pending" | "running" | "success" | "error";
   descriptor?: ToolRenderDescriptor;
+  /**
+   * Wall-clock stamps taken when the events arrive, not carried on the events themselves:
+   * `AgentEvent` is a cross-process protocol shared with the web/electron hosts, and a CLI-only
+   * elapsed-time display is not worth widening it. For a live run the view model observes both
+   * events within the same tick as the kernel emits them, so the difference is the real duration.
+   */
+  startedAt: number;
+  endedAt?: number;
 }
+
+/** One transcript row, in arrival order — a message or a tool card. */
+export type TranscriptEntry =
+  | { kind: "message"; message: TranscriptMessage }
+  | { kind: "tool"; tool: ToolCardState };
 
 export interface SessionViewState {
   busy: boolean;
   status: string;
+  /** Render order. Use this rather than `messages`/`tools`, which lose the interleaving. */
+  entries: readonly TranscriptEntry[];
   messages: readonly TranscriptMessage[];
   tools: readonly ToolCardState[];
+  /**
+   * Token/cache/cost readout for the most recent completed run, rendered on its own fixed line at
+   * the bottom of the screen.
+   *
+   * Deliberately not a transcript entry: it is a meter reading, not something anyone said. Routing
+   * it through `notice()` made it a `role: "system"` message, which stamped a meaningless `· ›`
+   * label on it and let it scroll away with the conversation.
+   */
+  costSummary?: string;
 }
 
 export class SessionViewModel {
   private readonly messages = new Map<string, TranscriptMessage>();
-  private readonly messageOrder: string[] = [];
   private readonly tools = new Map<string, ToolCardState>();
-  private readonly toolOrder: string[] = [];
+  /**
+   * Single arrival-ordered index over both kinds. Messages and tools used to be tracked in two
+   * separate lists and rendered one list after the other, which piled every tool card below the
+   * whole conversation instead of leaving it where it ran.
+   */
+  private readonly order: Array<{ kind: "message" | "tool"; id: string }> = [];
   private busy = false;
   private status = "Ready";
   private noticeCount = 0;
+  private costSummary?: string;
 
   hydrate(history: readonly Message[]): void {
     this.reset();
@@ -50,9 +79,10 @@ export class SessionViewModel {
    */
   reset(): void {
     this.messages.clear();
-    this.messageOrder.length = 0;
     this.tools.clear();
-    this.toolOrder.length = 0;
+    this.order.length = 0;
+    // The reading belongs to the runs we just dropped from view.
+    this.costSummary = undefined;
   }
 
   /** Local, LLM-invisible transcript line (command output, resume/branch reports). */
@@ -100,15 +130,18 @@ export class SessionViewModel {
           name: event.name,
           input: event.input,
           status: "running",
+          startedAt: Date.now(),
         });
         return;
       case "tool_execution_end": {
         const tool = this.tools.get(event.toolUseId);
+        const endedAt = Date.now();
         if (tool) {
           tool.output = event.output;
           tool.isError = event.isError;
           tool.status = event.isError ? "error" : "success";
           tool.descriptor = event.descriptor;
+          tool.endedAt = endedAt;
         } else {
           this.putTool({
             toolUseId: event.toolUseId,
@@ -118,6 +151,9 @@ export class SessionViewModel {
             isError: event.isError,
             status: event.isError ? "error" : "success",
             descriptor: event.descriptor,
+            // No start was ever seen, so report zero rather than inventing a duration.
+            startedAt: endedAt,
+            endedAt,
           });
         }
         return;
@@ -134,9 +170,9 @@ export class SessionViewModel {
       case "agent_end": {
         this.busy = false;
         this.status = event.error ? `Error: ${event.error}` : "Completed";
-        // 成本行走 notice：它是本地 transcript 行，不进消息树、LLM 看不到。
-        const cost = formatCostSummary(event.costReport);
-        if (cost) this.notice(cost);
+        // Kept as a separate field, not a transcript notice: see SessionViewState.costSummary.
+        // Left in place when a run reports nothing, so the last real reading stays on screen.
+        this.costSummary = formatCostSummary(event.costReport) ?? this.costSummary;
         return;
       }
       default:
@@ -145,11 +181,19 @@ export class SessionViewModel {
   }
 
   snapshot(): SessionViewState {
+    const entries: TranscriptEntry[] = this.order.map((ref) =>
+      ref.kind === "message"
+        ? { kind: "message", message: { ...this.messages.get(ref.id)! } }
+        : { kind: "tool", tool: { ...this.tools.get(ref.id)! } },
+    );
     return {
       busy: this.busy,
       status: this.status,
-      messages: this.messageOrder.map((id) => ({ ...this.messages.get(id)! })),
-      tools: this.toolOrder.map((id) => ({ ...this.tools.get(id)! })),
+      entries,
+      // Projections of `entries`, kept because most consumers only care about one kind.
+      messages: entries.flatMap((e) => (e.kind === "message" ? [e.message] : [])),
+      tools: entries.flatMap((e) => (e.kind === "tool" ? [e.tool] : [])),
+      costSummary: this.costSummary,
     };
   }
 
@@ -161,12 +205,12 @@ export class SessionViewModel {
   }
 
   private putMessage(message: TranscriptMessage): void {
-    if (!this.messages.has(message.id)) this.messageOrder.push(message.id);
+    if (!this.messages.has(message.id)) this.order.push({ kind: "message", id: message.id });
     this.messages.set(message.id, message);
   }
 
   private putTool(tool: ToolCardState): void {
-    if (!this.tools.has(tool.toolUseId)) this.toolOrder.push(tool.toolUseId);
+    if (!this.tools.has(tool.toolUseId)) this.order.push({ kind: "tool", id: tool.toolUseId });
     this.tools.set(tool.toolUseId, tool);
   }
 }
@@ -184,7 +228,8 @@ function contentToTranscript(content: Message["content"]): { text: string; think
   return { text: text.trimStart(), thinking };
 }
 
-function renderValue(value: unknown): string {
+/** Single source of truth for turning an unknown tool payload into displayable text. */
+export function renderValue(value: unknown): string {
   if (typeof value === "string") return value;
   try {
     const encoded = JSON.stringify(value);

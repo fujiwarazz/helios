@@ -317,7 +317,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 					const fullDesc = hint ? (desc ? `${hint} — ${desc}` : hint) : desc;
 					return {
 						name,
-						label: name,
+						// `name` is the bare command; show it slash-prefixed so the list matches what
+						// gets inserted. Matching and insertion both use `name`, never the label.
+						label: name.startsWith("/") ? name : `/${name}`,
 						description: fullDesc || undefined,
 					};
 				});
