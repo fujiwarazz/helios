@@ -200,6 +200,61 @@ describe("TranscriptComponent", () => {
     expect(lines.indexOf("pwd")).toBeLessThan(lines.indexOf("you are in /repo"));
   });
 
+  it("gives notices and errors no speaker label", () => {
+    // `· ›` above an error read as an unnamed speaker and told the user nothing; the text already
+    // says what it is.
+    const transcript = new TranscriptComponent();
+    transcript.update(state([msg("s1", "system", "[error] 429 Rate limit reached.")]));
+
+    const text = plain(transcript.render(60));
+    expect(text).toContain("429 Rate limit reached.");
+    expect(text).not.toContain("· ›");
+  });
+
+  it("strips Markdown markers from the collapsed thinking preview", () => {
+    // The preview is plain Text, not Markdown, so `**Preparing…**` rendered with the asterisks.
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state([
+        {
+          id: "a1",
+          role: "assistant",
+          text: "",
+          thinking: "**Preparing** to `ask`",
+          complete: false,
+        },
+      ]),
+    );
+
+    const text = plain(transcript.render(60));
+    expect(text).toContain("thinking · Preparing to ask");
+    expect(text).not.toContain("**");
+    expect(text).not.toContain("`");
+  });
+
+  it("does not echo an AskUserQuestion prompt inside its tool card", () => {
+    // The question is rendered in full by the prompt panel, so the card said the same thing twice.
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state(
+        [],
+        [
+          {
+            toolUseId: "t1",
+            name: "AskUserQuestion",
+            input: { question: "你希望我做什么修改？" },
+            status: "running",
+            startedAt: 0,
+          },
+        ],
+      ),
+    );
+
+    const text = plain(transcript.render(80));
+    expect(text).toContain("AskUserQuestion");
+    expect(text).not.toContain("你希望我做什么修改？");
+  });
+
   it("fills the tool card background across the full width of every line", () => {
     // The fill is applied by wrapping each padded line in `48;5;Nm … 49m`, so a `0m` reset inside a
     // styled child (the `$ command` line, the muted footer) used to cut the background short and

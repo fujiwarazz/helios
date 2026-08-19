@@ -10,6 +10,7 @@ import { HeliosInteractiveView } from "./heliosInteractiveView";
  */
 class FakeTerminal implements Terminal {
   onInput?: (data: string) => void;
+  readonly writes: string[] = [];
   readonly columns = 100;
   readonly rows = 40;
   readonly kittyProtocolActive = false;
@@ -19,7 +20,9 @@ class FakeTerminal implements Terminal {
   }
   stop(): void {}
   async drainInput(): Promise<void> {}
-  write(): void {}
+  write(data: string): void {
+    this.writes.push(data);
+  }
   moveBy(): void {}
   hideCursor(): void {}
   showCursor(): void {}
@@ -40,7 +43,7 @@ function harness() {
   const view = new HeliosInteractiveView(ui);
   view.start({ entries: [], messages: [], tools: [], busy: false, status: "Ready" });
   const press = (data: string): void => terminal.onInput?.(data);
-  return { view, press, ui };
+  return { view, press, ui, terminal };
 }
 
 describe("HeliosInteractiveView question overlay", () => {
@@ -99,6 +102,20 @@ describe("HeliosInteractiveView question overlay", () => {
     press(ENTER);
 
     await expect(answered).resolves.toEqual({ answers: ["气泡水"] });
+  });
+
+  it("renders the question in the document, not padded out to the middle of the screen", async () => {
+    // `showOverlay()` positions screen-relative: `compositeOverlays` pads the content to the full
+    // terminal height (40 rows here) and drops the panel at the centre, which on a fresh session
+    // put it a dozen blank rows below the prompt. Counting rendered rows is the direct gate: the
+    // document version stays as short as its content.
+    const { view, terminal } = harness();
+    view.askQuestion({ question: "选哪个基底？", options: [{ label: "main" }] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const output = terminal.writes.join("");
+    expect(output).toContain("选哪个基底？");
+    expect(output.split("\n").length).toBeLessThan(terminal.rows);
   });
 
   it("returns focus to the editor once the overlay closes", async () => {

@@ -30,6 +30,7 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
   private readonly ui: TUI;
   private readonly document = new Container();
   private readonly transcript = new TranscriptComponent();
+  private readonly questionSlot = new Container();
   private readonly costLine = new Text("", 1, 0);
   private readonly status = new Text("", 1, 0);
   private readonly editor: Editor;
@@ -54,6 +55,8 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
     this.document.addChild(new Text(palette.accent("helios"), 1, 0));
     this.document.addChild(this.transcript);
     this.document.addChild(new Spacer(1));
+    // A pending question sits directly above the prompt, where the user is already looking.
+    this.document.addChild(this.questionSlot);
     // Above the status line and below the transcript: a meter reading that stays put instead of
     // scrolling away with the conversation.
     this.document.addChild(this.costLine);
@@ -119,15 +122,26 @@ export class HeliosInteractiveView implements InteractiveView, ApprovalOverlayHo
     return askApproval(this, request);
   }
 
+  /**
+   * The question is part of the document, not a `showOverlay()` overlay.
+   *
+   * Overlays are positioned relative to the *screen*: `compositeOverlays` pads the content out to
+   * the full terminal height and drops the box at, say, the centre. On a tall terminal with a short
+   * conversation that means a dozen blank rows and then a panel floating in the middle of nowhere,
+   * far below the prompt the user is typing at. Putting the question in the document keeps it
+   * attached to the bottom of the transcript, which is also what the answer will scroll into.
+   */
   show(request: AskQuestionRequest, resolve: (answers: string[]) => void): void {
     const overlay = new QuestionOverlay(request);
-    // The overlay root is itself focusable, so showOverlay's own focus handling is correct here and
-    // hide() restores the editor on its own. See QuestionOverlay for why that matters.
-    const handle = this.ui.showOverlay(overlay, { width: "70%", maxHeight: "60%" });
     overlay.onDone = (answers) => {
-      handle.hide();
+      this.questionSlot.clear();
+      this.ui.setFocus(this.editor);
+      this.ui.requestRender();
       resolve(answers);
     };
+    this.questionSlot.addChild(overlay);
+    this.ui.setFocus(overlay);
+    this.ui.requestRender();
   }
 
   private render(state: SessionViewState): void {
