@@ -28,9 +28,16 @@ export interface ToolCardState {
   endedAt?: number;
 }
 
+/** One transcript row, in arrival order — a message or a tool card. */
+export type TranscriptEntry =
+  | { kind: "message"; message: TranscriptMessage }
+  | { kind: "tool"; tool: ToolCardState };
+
 export interface SessionViewState {
   busy: boolean;
   status: string;
+  /** Render order. Use this rather than `messages`/`tools`, which lose the interleaving. */
+  entries: readonly TranscriptEntry[];
   messages: readonly TranscriptMessage[];
   tools: readonly ToolCardState[];
   /**
@@ -46,9 +53,13 @@ export interface SessionViewState {
 
 export class SessionViewModel {
   private readonly messages = new Map<string, TranscriptMessage>();
-  private readonly messageOrder: string[] = [];
   private readonly tools = new Map<string, ToolCardState>();
-  private readonly toolOrder: string[] = [];
+  /**
+   * Single arrival-ordered index over both kinds. Messages and tools used to be tracked in two
+   * separate lists and rendered one list after the other, which piled every tool card below the
+   * whole conversation instead of leaving it where it ran.
+   */
+  private readonly order: Array<{ kind: "message" | "tool"; id: string }> = [];
   private busy = false;
   private status = "Ready";
   private noticeCount = 0;
@@ -68,9 +79,8 @@ export class SessionViewModel {
    */
   reset(): void {
     this.messages.clear();
-    this.messageOrder.length = 0;
     this.tools.clear();
-    this.toolOrder.length = 0;
+    this.order.length = 0;
     // The reading belongs to the runs we just dropped from view.
     this.costSummary = undefined;
   }
@@ -171,11 +181,18 @@ export class SessionViewModel {
   }
 
   snapshot(): SessionViewState {
+    const entries: TranscriptEntry[] = this.order.map((ref) =>
+      ref.kind === "message"
+        ? { kind: "message", message: { ...this.messages.get(ref.id)! } }
+        : { kind: "tool", tool: { ...this.tools.get(ref.id)! } },
+    );
     return {
       busy: this.busy,
       status: this.status,
-      messages: this.messageOrder.map((id) => ({ ...this.messages.get(id)! })),
-      tools: this.toolOrder.map((id) => ({ ...this.tools.get(id)! })),
+      entries,
+      // Projections of `entries`, kept because most consumers only care about one kind.
+      messages: entries.flatMap((e) => (e.kind === "message" ? [e.message] : [])),
+      tools: entries.flatMap((e) => (e.kind === "tool" ? [e.tool] : [])),
       costSummary: this.costSummary,
     };
   }
@@ -188,12 +205,12 @@ export class SessionViewModel {
   }
 
   private putMessage(message: TranscriptMessage): void {
-    if (!this.messages.has(message.id)) this.messageOrder.push(message.id);
+    if (!this.messages.has(message.id)) this.order.push({ kind: "message", id: message.id });
     this.messages.set(message.id, message);
   }
 
   private putTool(tool: ToolCardState): void {
-    if (!this.tools.has(tool.toolUseId)) this.toolOrder.push(tool.toolUseId);
+    if (!this.tools.has(tool.toolUseId)) this.order.push({ kind: "tool", id: tool.toolUseId });
     this.tools.set(tool.toolUseId, tool);
   }
 }

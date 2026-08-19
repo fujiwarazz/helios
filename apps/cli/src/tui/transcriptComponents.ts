@@ -139,8 +139,8 @@ export class ToolCardComponent {
  */
 export class TranscriptComponent implements Component {
   readonly container = new Container();
-  private readonly messageList = new Container();
-  private readonly toolList = new Container();
+  /** Messages and tool cards share one container so they can interleave. */
+  private readonly entryList = new Container();
   private readonly pending = new Container();
   private readonly messages = new Map<string, MessageComponent>();
   private readonly tools = new Map<string, ToolCardComponent>();
@@ -149,15 +149,34 @@ export class TranscriptComponent implements Component {
   private pendingComponent?: Component;
 
   constructor() {
-    this.container.addChild(this.messageList);
-    this.container.addChild(this.toolList);
+    this.container.addChild(this.entryList);
     // Last, so the pending indicator sits at the tail of the transcript where the reply will land.
     this.container.addChild(this.pending);
   }
 
-  update(state: Pick<SessionViewState, "messages" | "tools">): void {
-    this.messageList.clear();
-    for (const message of state.messages) {
+  /**
+   * Rebuilds the row order from `state.entries` each frame while keeping the component instances —
+   * they hold Markdown/Box layout caches, so recreating them per frame would be wasteful and would
+   * also lose per-message state.
+   *
+   * Iterating a single arrival-ordered list is what keeps a tool card where it ran. Rendering all
+   * messages and then all tools, as this used to, pushed every card below the entire conversation.
+   */
+  update(state: Pick<SessionViewState, "entries">): void {
+    this.entryList.clear();
+    for (const entry of state.entries) {
+      if (entry.kind === "tool") {
+        const { tool } = entry;
+        let component = this.tools.get(tool.toolUseId);
+        if (!component) {
+          component = new ToolCardComponent();
+          this.tools.set(tool.toolUseId, component);
+        }
+        component.update(tool, this.toolOutputExpanded);
+        this.entryList.addChild(component.container);
+        continue;
+      }
+      const { message } = entry;
       // An assistant message with neither text nor reasoning has nothing to show but its label.
       // That happens while waiting for the first delta (the pending indicator covers that, and two
       // `helios ›` labels would be worse) and permanently when a run dies before producing output
@@ -169,21 +188,18 @@ export class TranscriptComponent implements Component {
         this.messages.set(message.id, component);
       }
       component.update(message, this.thinkingExpanded);
-      this.messageList.addChild(component.container);
+      this.entryList.addChild(component.container);
     }
-    this.dropMissing(this.messages, state.messages.map((message) => message.id));
 
-    this.toolList.clear();
-    for (const tool of state.tools) {
-      let component = this.tools.get(tool.toolUseId);
-      if (!component) {
-        component = new ToolCardComponent();
-        this.tools.set(tool.toolUseId, component);
-      }
-      component.update(tool, this.toolOutputExpanded);
-      this.toolList.addChild(component.container);
-    }
-    this.dropMissing(this.tools, state.tools.map((tool) => tool.toolUseId));
+    const live = state.entries;
+    this.dropMissing(
+      this.messages,
+      live.flatMap((e) => (e.kind === "message" ? [e.message.id] : [])),
+    );
+    this.dropMissing(
+      this.tools,
+      live.flatMap((e) => (e.kind === "tool" ? [e.tool.toolUseId] : [])),
+    );
   }
 
   /**

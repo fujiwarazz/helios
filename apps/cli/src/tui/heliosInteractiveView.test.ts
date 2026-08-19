@@ -38,7 +38,7 @@ function harness() {
   const terminal = new FakeTerminal();
   const ui = new TuiMainScreen(terminal);
   const view = new HeliosInteractiveView(ui);
-  view.start({ messages: [], tools: [], busy: false, status: "Ready" });
+  view.start({ entries: [], messages: [], tools: [], busy: false, status: "Ready" });
   const press = (data: string): void => terminal.onInput?.(data);
   return { view, press, ui };
 }

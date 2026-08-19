@@ -2,10 +2,22 @@ import { describe, expect, it } from "vitest";
 import type { SessionViewState } from "./sessionViewModel";
 import { TranscriptComponent } from "./transcriptComponents";
 
+/** Messages first, then tools — the ordering most cases here do not care about. */
 const state = (
   messages: SessionViewState["messages"],
   tools: SessionViewState["tools"] = [],
-): Pick<SessionViewState, "messages" | "tools"> => ({ messages, tools });
+): Pick<SessionViewState, "entries"> => ({
+  entries: [
+    ...messages.map((message) => ({ kind: "message" as const, message })),
+    ...tools.map((tool) => ({ kind: "tool" as const, tool })),
+  ],
+});
+
+const msg = (
+  id: string,
+  role: SessionViewState["messages"][number]["role"],
+  text: string,
+): SessionViewState["messages"][number] => ({ id, role, text, thinking: "", complete: true });
 
 const plain = (lines: readonly string[]): string =>
   lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
@@ -158,6 +170,67 @@ describe("TranscriptComponent", () => {
     const text = plain(transcript.render(80));
     expect(text).toContain("exit status 1");
     expect(text).toContain("Took 5ms");
+  });
+
+  it("leaves a tool card where it ran, between the messages around it", () => {
+    // Messages and tool cards used to live in two separate containers rendered one after the other,
+    // so every card piled up below the whole conversation, far from the turn that invoked it.
+    const transcript = new TranscriptComponent();
+    transcript.update({
+      entries: [
+        { kind: "message", message: msg("a1", "assistant", "let me look") },
+        {
+          kind: "tool",
+          tool: {
+            toolUseId: "t1",
+            name: "Bash",
+            input: { command: "pwd" },
+            output: "/repo",
+            status: "success",
+            startedAt: 0,
+            endedAt: 1,
+          },
+        },
+        { kind: "message", message: msg("a2", "assistant", "you are in /repo") },
+      ],
+    });
+
+    const lines = plain(transcript.render(80));
+    expect(lines.indexOf("let me look")).toBeLessThan(lines.indexOf("pwd"));
+    expect(lines.indexOf("pwd")).toBeLessThan(lines.indexOf("you are in /repo"));
+  });
+
+  it("fills the tool card background across the full width of every line", () => {
+    // The fill is applied by wrapping each padded line in `48;5;Nm … 49m`, so a `0m` reset inside a
+    // styled child (the `$ command` line, the muted footer) used to cut the background short and
+    // leave a ragged block.
+    const transcript = new TranscriptComponent();
+    transcript.update(
+      state(
+        [],
+        [
+          {
+            toolUseId: "t1",
+            name: "Bash",
+            input: { command: "pwd" },
+            output: "/repo",
+            status: "success",
+            startedAt: 0,
+            endedAt: 12,
+          },
+        ],
+      ),
+    );
+
+    const filled = transcript.render(40).filter((line) => line.includes("\x1b[48;5;235m"));
+    expect(filled.length).toBeGreaterThanOrEqual(3);
+    for (const line of filled) {
+      // A blanket reset anywhere inside a filled row ends the background early. Asserting on the
+      // stripped text would not catch this: the padding spaces are present either way, it is the
+      // fill that dies. Styles must use targeted resets (39m / 22m) instead.
+      expect(line).not.toContain("\x1b[0m");
+      expect(line.replace(/\x1b\[[0-9;]*m/g, "")).toHaveLength(40);
+    }
   });
 
   it("shows the pending indicator under the assistant label, at the transcript tail", () => {
